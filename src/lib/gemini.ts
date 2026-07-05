@@ -1,24 +1,21 @@
-import { GoogleGenAI } from "@google/genai";
-
-const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY || "" });
-
 export async function rewriteText(text: string, mood: string, language: string) {
-  if (!process.env.GEMINI_API_KEY) {
-    return text;
-  }
-
   try {
-    const response = await ai.models.generateContent({
-      model: "gemini-3-flash-preview",
-      contents: `Rewrite the following text to sound strictly ${mood} in ${language}. 
-      Keep it concise and expressive. Do not add any conversational meta-text, just the rewritten content.
-      
-      Text: "${text}"`,
+    const response = await fetch("/api/rewrite", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ text, mood, lang: language }),
     });
-    
-    return response.text?.trim() || text;
+
+    if (!response.ok) {
+      throw new Error("Server rewrite failed");
+    }
+
+    const data = await response.json();
+    return data.text || text;
   } catch (error) {
-    console.error("AI Rewriting error:", error);
+    console.error("AI Rewriting client proxy error:", error);
     return text;
   }
 }

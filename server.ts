@@ -2,44 +2,406 @@ import express from "express";
 import { createServer as createViteServer } from "vite";
 import path from "path";
 import { fileURLToPath } from "url";
+import { GoogleGenAI, Modality } from "@google/genai";
+import dotenv from "dotenv";
 import axios from "axios";
+
+dotenv.config();
+
+dotenv.config();
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
+
+let aiInstance: GoogleGenAI | null = null;
+
+function getGeminiClient(): GoogleGenAI {
+  if (!aiInstance) {
+    const apiKey = process.env.GEMINI_API_KEY;
+    if (!apiKey) {
+      throw new Error("GEMINI_API_KEY environment variable is not defined. Please define it in application secrets.");
+    }
+    aiInstance = new GoogleGenAI({
+      apiKey: apiKey,
+      httpOptions: {
+        headers: {
+          "User-Agent": "aistudio-build",
+        },
+      },
+    });
+  }
+  return aiInstance;
+}
+
+// Helper function to insert a standard 44-byte RIFF WAV header to raw PCM bytes
+function addWavHeader(
+  pcmBuffer: Buffer,
+  sampleRate: number = 24000,
+  numChannels: number = 1,
+  bitsPerSample: number = 16
+): Buffer {
+  const header = Buffer.alloc(44);
+  const dataLength = pcmBuffer.length;
+  const fileLength = dataLength + 36;
+
+  header.write("RIFF", 0);
+  header.writeUInt32LE(fileLength, 4);
+  header.write("WAVE", 8);
+  header.write("fmt ", 12);
+  header.writeUInt32LE(16, 16);
+  header.writeUInt16LE(1, 20); // 1 = Raw linear PCM
+  header.writeUInt16LE(numChannels, 22);
+  header.writeUInt32LE(sampleRate, 24);
+  const byteRate = (sampleRate * numChannels * bitsPerSample) / 8;
+  header.writeUInt32LE(byteRate, 28);
+  const blockAlign = (numChannels * bitsPerSample) / 8;
+  header.writeUInt16LE(blockAlign, 32);
+  header.writeUInt16LE(bitsPerSample, 34);
+  header.write("data", 36);
+  header.writeUInt32LE(dataLength, 40);
+
+  return Buffer.concat([header, pcmBuffer]);
+}
+
+// Helper function to extract exact retry delay in ms from 429 Quota Exceeded error
+function parseRetryDelayMs(error: any): number {
+  try {
+    const errorStr = typeof error === "string" ? error : JSON.stringify(error);
+    const retryDelayMatch = errorStr.match(/"retryDelay"\s*:\s*"(\d+(?:\.\d+)?)s"/i);
+    if (retryDelayMatch && retryDelayMatch[1]) {
+      return Math.ceil(parseFloat(retryDelayMatch[1]) * 1000) + 1000;
+    }
+    const retryInMatch = errorStr.match(/retry in\s+(\d+(?:\.\d+)?)s/i);
+    if (retryInMatch && retryInMatch[1]) {
+      return Math.ceil(parseFloat(retryInMatch[1]) * 1000) + 1000;
+    }
+  } catch (e) {
+    // ignore parse error
+  }
+  return 10000; // Default fallback delay of 10s for 429 rate limit
+}
+
+// Helper function to split long text into clean, natural speech chunks (up to ~3200 chars)
+function splitTextIntoChunks(text: string, maxChunkLength: number = 3200): string[] {
+  const chunks: string[] = [];
+  const trimmed = text.trim();
+  if (!trimmed) return [];
+
+  if (trimmed.length <= maxChunkLength) {
+    return [trimmed];
+  }
+
+  // Split text by sentence boundaries (. ! ? । \n)
+  const sentences = trimmed.split(/(?<=[.!?।\n])\s+/);
+  let currentChunk = "";
+
+  for (const sentence of sentences) {
+    if ((currentChunk + (currentChunk ? " " : "") + sentence).length <= maxChunkLength) {
+      currentChunk = currentChunk ? `${currentChunk} ${sentence}` : sentence;
+    } else {
+      if (currentChunk.trim()) {
+        chunks.push(currentChunk.trim());
+      }
+      if (sentence.length > maxChunkLength) {
+        // Split by clause punctuation (commas, semicolons)
+        const clauses = sentence.split(/(?<=[,;|])\s+/);
+        let clauseChunk = "";
+        for (const clause of clauses) {
+          if ((clauseChunk + (clauseChunk ? " " : "") + clause).length <= maxChunkLength) {
+            clauseChunk = clauseChunk ? `${clauseChunk} ${clause}` : clause;
+          } else {
+            if (clauseChunk.trim()) chunks.push(clauseChunk.trim());
+            if (clause.length > maxChunkLength) {
+              // Word level splitting as fallback
+              const words = clause.split(/\s+/);
+              let wordChunk = "";
+              for (const word of words) {
+                if ((wordChunk + (wordChunk ? " " : "") + word).length <= maxChunkLength) {
+                  wordChunk = wordChunk ? `${wordChunk} ${word}` : word;
+                } else {
+                  if (wordChunk.trim()) chunks.push(wordChunk.trim());
+                  wordChunk = word;
+                }
+              }
+              clauseChunk = wordChunk.trim();
+            } else {
+              clauseChunk = clause;
+            }
+          }
+        }
+        currentChunk = clauseChunk.trim();
+      } else {
+        currentChunk = sentence;
+      }
+    }
+  }
+
+  if (currentChunk.trim()) {
+    chunks.push(currentChunk.trim());
+  }
+
+  return chunks;
+}
+
+// Fallback TTS generator using Google Translate TTS service (Fast, reliable, unlimited, supports long text)
+async function generateFallbackAudio(text: string, lang: string = "hi"): Promise<Buffer> {
+  const langCode = (lang || "hi").split("-")[0] || "hi";
+  const maxLen = 180;
+  const trimmed = text.trim();
+  if (!trimmed) throw new Error("Empty text for fallback TTS");
+
+  const chunks: string[] = [];
+  let remaining = trimmed;
+
+  while (remaining.length > 0) {
+    if (remaining.length <= maxLen) {
+      chunks.push(remaining);
+      break;
+    }
+    let cutIdx = remaining.lastIndexOf(" ", maxLen);
+    if (cutIdx <= 0) cutIdx = maxLen;
+    chunks.push(remaining.slice(0, cutIdx).trim());
+    remaining = remaining.slice(cutIdx).trim();
+  }
+
+  const mp3Buffers: Buffer[] = [];
+  for (const chunk of chunks) {
+    if (!chunk) continue;
+    const url = `https://translate.google.com/translate_tts?ie=UTF-8&q=${encodeURIComponent(chunk)}&tl=${langCode}&client=tw-ob`;
+    const response = await axios.get(url, {
+      responseType: "arraybuffer",
+      headers: {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+      },
+      timeout: 8000
+    });
+    mp3Buffers.push(Buffer.from(response.data));
+  }
+
+  return Buffer.concat(mp3Buffers);
+}
+
+async function generateAudioForChunk(
+  textChunk: string, 
+  voiceID: string, 
+  maxRetries: number = 1
+): Promise<Buffer> {
+  let lastError: any = null;
+
+  // Map voice ID to Gemini prebuilt voice and persona directive
+  let geminiVoice = "Kore";
+  let voicePersona = `Speak in a clear natural female voice`;
+
+  if (voiceID === 'Charon') {
+    geminiVoice = "Charon";
+    voicePersona = `Speak in a deep baritone male voice`;
+  } else if (voiceID === 'Puck') {
+    geminiVoice = "Puck";
+    voicePersona = `Speak in a natural clear male voice`;
+  } else if (voiceID === 'Fenrir') {
+    geminiVoice = "Fenrir";
+    voicePersona = `Speak in a strong energetic male voice`;
+  } else if (voiceID === 'Aoede') {
+    geminiVoice = "Aoede";
+    voicePersona = `Speak in a soft, gentle, calm whispering female voice`;
+  } else if (voiceID === 'Priya') {
+    geminiVoice = "Kore";
+    voicePersona = `Speak in a confident, crisp, formal Indian news anchor female voice`;
+  } else if (voiceID === 'Ananya') {
+    geminiVoice = "Aoede";
+    voicePersona = `Speak in a cheerful, energetic, bright young girl voice`;
+  } else if (voiceID === 'Kavya') {
+    geminiVoice = "Kore";
+    voicePersona = `Speak in a warm, emotional, storytelling female voice`;
+  } else if (voiceID === 'Sunita') {
+    geminiVoice = "Aoede";
+    voicePersona = `Speak in a professional, formal corporate executive female voice`;
+  } else if (voiceID === 'Riya') {
+    geminiVoice = "Kore";
+    voicePersona = `Speak in an upbeat, friendly, Radio Jockey RJ female voice`;
+  } else if (voiceID === 'Shalini') {
+    geminiVoice = "Aoede";
+    voicePersona = `Speak in a clear, patient, educational teacher female voice`;
+  } else {
+    geminiVoice = "Kore";
+    voicePersona = `Speak in a clear natural female voice`;
+  }
+
+  // Parse story expression and pacing tags ([slow], [fast], [pause], [dramatic], [whisper], [excited])
+  let formattedText = textChunk;
+  formattedText = formattedText.replace(/\[pause\]/gi, " ... (pausing for 1 second) ... ");
+  formattedText = formattedText.replace(/\[pause:(\d+)s\]/gi, (_, sec) => ` ... (pausing for ${sec} seconds) ... `);
+  formattedText = formattedText.replace(/\[slow\]([\s\S]*?)\[\/slow\]/gi, ' (speaking slowly and deliberately: "$1") ');
+  formattedText = formattedText.replace(/\[fast\]([\s\S]*?)\[\/fast\]/gi, ' (speaking rapidly and hurriedly: "$1") ');
+  formattedText = formattedText.replace(/\[dramatic\]([\s\S]*?)\[\/dramatic\]/gi, ' (speaking with dramatic suspense and deep expression: "$1") ');
+  formattedText = formattedText.replace(/\[whisper\]([\s\S]*?)\[\/whisper\]/gi, ' (speaking in a soft quiet whisper: "$1") ');
+  formattedText = formattedText.replace(/\[excited\]([\s\S]*?)\[\/excited\]/gi, ' (speaking with high excitement and joy: "$1") ');
+  formattedText = formattedText.replace(/\[sad\]([\s\S]*?)\[\/sad\]/gi, ' (speaking in a mournful, sad emotional tone: "$1") ');
+
+  const voicePrompt = `${voicePersona}. Follow all emotional tone, pacing, and pause cues strictly: ${formattedText}`;
+
+  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    try {
+      const response = await getGeminiClient().models.generateContent({
+        model: "gemini-3.1-flash-tts-preview",
+        contents: [{ parts: [{ text: voicePrompt }] }],
+        config: {
+          responseModalities: [Modality.AUDIO],
+          speechConfig: {
+            voiceConfig: {
+              prebuiltVoiceConfig: { voiceName: geminiVoice },
+            },
+          },
+        },
+      });
+
+      const part = response.candidates?.[0]?.content?.parts?.[0];
+      const base64Audio = part?.inlineData?.data;
+
+      if (!base64Audio) {
+        throw new Error("No audio content received from Gemini model for chunk");
+      }
+
+      return Buffer.from(base64Audio, "base64");
+    } catch (err: any) {
+      lastError = err;
+      const errMessage = err?.message || String(err);
+      const isQuotaError = errMessage.includes("429") || errMessage.includes("RESOURCE_EXHAUSTED") || errMessage.includes("quota");
+
+      console.warn(`[TTS Chunk Attempt ${attempt + 1}/${maxRetries + 1}] Failed (Quota: ${isQuotaError}): ${errMessage}`);
+
+      if (isQuotaError) {
+        // Fail fast on quota limit so server immediately uses instant fallback TTS
+        throw new Error(`Gemini TTS Quota Limit Exceeded: ${errMessage}`);
+      }
+
+      if (attempt < maxRetries) {
+        await new Promise((resolve) => setTimeout(resolve, 1000));
+      }
+    }
+  }
+
+  throw new Error(`Failed audio chunk generation: ${lastError?.message || lastError}`);
+}
+
+async function generateFullAudio(text: string, voice: string): Promise<Buffer> {
+  const validVoices = ["Puck", "Charon", "Kore", "Aoede", "Fenrir", "Priya", "Ananya", "Kavya", "Sunita", "Riya", "Shalini"];
+  const voiceID = validVoices.includes(voice) ? voice : "Puck";
+
+  // Gemini TTS model outputs standard high-fidelity 24,000 Hz 16-bit PCM audio
+  const sampleRate = 24000;
+
+  // Split into ~3200 character chunks (~500 words per chunk) to minimize API call count
+  const chunks = splitTextIntoChunks(text, 3200);
+
+  if (chunks.length === 0) {
+    throw new Error("Text is empty");
+  }
+
+  console.log(`Processing TTS request: Total length ${text.length} chars, split into ${chunks.length} chunk(s) using voice ${voiceID}`);
+
+  const pcmBuffers: Buffer[] = [];
+
+  for (let i = 0; i < chunks.length; i++) {
+    console.log(`[TTS Progress] Generating chunk ${i + 1}/${chunks.length} (${chunks[i].length} chars)...`);
+    const chunkBuffer = await generateAudioForChunk(chunks[i], voiceID);
+    pcmBuffers.push(chunkBuffer);
+
+    // Pace requests sequentially with a 1.2s delay to avoid exceeding Gemini Free Tier rate limits (10 RPM)
+    if (i < chunks.length - 1) {
+      await new Promise((resolve) => setTimeout(resolve, 1200));
+    }
+  }
+
+  const combinedPcm = Buffer.concat(pcmBuffers);
+  return addWavHeader(combinedPcm, sampleRate);
+}
 
 async function startServer() {
   const app = express();
   const PORT = 3000;
 
-  app.use(express.json());
+  app.use(express.json({ limit: "50mb" }));
+  app.use(express.urlencoded({ extended: true, limit: "50mb" }));
 
-  // API Route for real TTS audio generation (for download functionality)
-  app.get("/api/tts", async (req, res) => {
-    const { text, lang } = req.query;
+  // Handler for TTS (both GET and POST for small and massive text)
+  const ttsHandler: express.RequestHandler = async (req, res) => {
+    const text = req.method === "POST" ? req.body.text : req.query.text;
+    const voice = req.method === "POST" ? req.body.voice : req.query.voice;
+    const style = req.method === "POST" ? req.body.style : req.query.style;
+    const lang = req.method === "POST" ? req.body.lang : req.query.lang;
+
+    if (!text || typeof text !== "string" || !text.trim()) {
+      res.status(400).send("Text is required");
+      return;
+    }
+
+    try {
+      // Primary: Try Gemini 3.1 TTS for natural hand-crafted voice
+      const wavBuffer = await generateFullAudio(text, String(voice || "Kore"));
+      res.set("Content-Type", "audio/wav");
+      res.set("Content-Length", wavBuffer.length.toString());
+      res.send(wavBuffer);
+    } catch (geminiError: any) {
+      console.warn("Gemini TTS unavailable or quota limit reached. Switching to instant fallback TTS:", geminiError.message);
+      try {
+        // Fallback: Google Translate TTS (Unlimited, fast, works instantly for any length text)
+        const mp3Buffer = await generateFallbackAudio(text, String(lang || "hi"));
+        res.set("Content-Type", "audio/mpeg");
+        res.set("Content-Length", mp3Buffer.length.toString());
+        res.send(mp3Buffer);
+      } catch (fallbackError: any) {
+        console.error("Fallback TTS error:", fallbackError);
+        res.status(500).send(geminiError.message || "Error generating speech audio");
+      }
+    }
+  };
+
+  app.get("/api/tts", ttsHandler);
+  app.post("/api/tts", ttsHandler);
+
+  // Secure Server-side Smart Rewrite endpoint using gemini-3.5-flash
+  app.post("/api/rewrite", async (req, res) => {
+    const { text, mood, lang } = req.body;
 
     if (!text) {
       return res.status(400).send("Text is required");
     }
 
     try {
-      // Proxying Google Translate's TTS for high-quality audio generation
-      // This allows the user to download actual speech instead of humming music.
-      const url = `https://translate.google.com/translate_tts?ie=UTF-8&q=${encodeURIComponent(
-        String(text)
-      )}&tl=${lang || "hi"}&client=tw-ob`;
+      let prompt = "";
+      if (mood === "kahani" || mood === "story_expression") {
+        prompt = `You are an expert Hindi/English Audiobook Director and Storytelling Assistant.
+Transform the following text into a highly expressive, dramatic storytelling script by embedding emotional expression tags and pacing pauses.
 
-      const response = await axios.get(url, {
-        responseType: "arraybuffer",
-        headers: {
-          "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
-        }
+RULES & TAGS TO INSERT:
+1. Insert [pause] or "..." where the speaker should pause for dramatic effect or breathing.
+2. Wrap slow, suspenseful, or serious lines in [slow]sentence[/slow].
+3. Wrap fast, urgent, or action-packed lines in [fast]sentence[/fast].
+4. Wrap dramatic, emotional, or climax moments in [dramatic]sentence[/dramatic].
+5. Wrap quiet secrets or whispers in [whisper]sentence[/whisper].
+6. Wrap excited, cheerful, or loud lines in [excited]sentence[/excited].
+
+Keep the story language in ${lang || "Hindi"}. Do not change the underlying meaning or plot. Do NOT include any intro, explanation, or meta commentary. Return ONLY the formatted script with tags.
+
+Original Text:
+"${text}"`;
+      } else {
+        prompt = `Rewrite the following text to sound strictly ${mood || "expressive"} in ${lang || "Hindi"}. 
+Keep it natural, concise, and beautifully readable. Do not add any intro commentary or meta-text, just return the rewritten text directly.
+
+Text: "${text}"`;
+      }
+
+      const response = await getGeminiClient().models.generateContent({
+        model: "gemini-3.5-flash",
+        contents: prompt,
       });
 
-      res.set("Content-Type", "audio/mpeg");
-      res.send(response.data);
-    } catch (error) {
-      console.error("TTS Proxy error:", error);
-      res.status(500).send("Error generating speech audio");
+      res.json({ text: response.text?.trim() || text });
+    } catch (error: any) {
+      console.error("AI Rewriting error:", error);
+      res.status(500).send(error.message || "Error with AI rewrite");
     }
   });
 

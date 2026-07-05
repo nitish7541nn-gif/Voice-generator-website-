@@ -7,7 +7,7 @@ import React, { useState, useEffect, useRef } from 'react';
 import { 
   Mic2, Play, Square, Download, Trash2, Wand2, 
   Settings, Languages, Volume2, FastForward, Activity,
-  Music, History, Github, Share2, Info, Loader2
+  Music, Github, Share2, Info, Loader2, SlidersHorizontal, ChevronDown, ChevronUp
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { rewriteText } from './lib/gemini.ts';
@@ -15,17 +15,10 @@ import { rewriteText } from './lib/gemini.ts';
 // --- Types ---
 interface VoiceSettings {
   lang: string;
-  style: string;
   speed: number;
   pitch: number;
   volume: number;
-}
-
-interface AudioHistoryItem {
-  id: string;
-  text: string;
-  settings: VoiceSettings;
-  timestamp: number;
+  voice: string;
 }
 
 // --- Constants ---
@@ -42,15 +35,21 @@ const LANGUAGES = [
   { code: 'es-ES', label: '🇪🇸 Spanish', native: 'Español', p: 1.1, r: 1.08 },
 ];
 
-const STYLES = [
-  { id: 'normal', label: 'Normal', icon: '👦', suffix: '', p: 1.0, r: 1.0 },
-  { id: 'cat', label: 'Cat', icon: '🐱', suffix: ' meow meow', p: 1.7, r: 1.2 },
-  { id: 'dog', label: 'Dog', icon: '🐶', suffix: ' bhow bhow', p: 1.4, r: 1.1 },
-  { id: 'robot', label: 'Robot', icon: '🤖', suffix: '', p: 0.7, r: 0.85 },
-  { id: 'happy', label: 'Happy', icon: '😊', suffix: ' haha!', p: 1.3, r: 1.15 },
-  { id: 'sad', label: 'Sad', icon: '😢', suffix: ' ...oh no', p: 0.7, r: 0.75 },
-  { id: 'angry', label: 'Angry', icon: '😠', suffix: ' GRRR!', p: 1.1, r: 1.25 },
-  { id: 'excited', label: 'Excited', icon: '🤩', suffix: ' WOW!', p: 1.4, r: 1.35 },
+const AI_VOICES = [
+  // 👩 Female / Ladies Voices (महिला आवाजें - ElevenLabs Style)
+  { id: 'Kore', label: '👩 कोरिया (Kore - Natural Female AI)', desc: 'Clear Natural Female Voice', gender: 'female', pitchOffset: 1.0 },
+  { id: 'Aoede', label: '👩 आयोड (Aoede - Soft & Gentle Female)', desc: 'Soft Whispering Calm Female Voice', gender: 'female', pitchOffset: 1.15 },
+  { id: 'Priya', label: '👩 प्रिया (Priya - News Anchor Female)', desc: 'Confident & Crisp News Reader Voice', gender: 'female', pitchOffset: 1.05 },
+  { id: 'Ananya', label: '👩 अनन्या (Ananya - Young Energetic Girl)', desc: 'Cheerful & Bright Young Female Voice', gender: 'female', pitchOffset: 1.25 },
+  { id: 'Kavya', label: '👩 काव्या (Kavya - Storyteller Woman)', desc: 'Warm, Expressive & Melodic Voice', gender: 'female', pitchOffset: 0.95 },
+  { id: 'Sunita', label: '👩 सुनिता (Sunita - Professional Business)', desc: 'Formal Corporate Executive Voice', gender: 'female', pitchOffset: 1.02 },
+  { id: 'Riya', label: '👩 रिया (Riya - Radio Jockey RJ)', desc: 'Upbeat & Friendly RJ Voice', gender: 'female', pitchOffset: 1.10 },
+  { id: 'Shalini', label: '👩 शालिनी (Shalini - Teacher / Educator)', desc: 'Clear & Patient Teacher Voice', gender: 'female', pitchOffset: 1.08 },
+
+  // 👨 Male Voices (पुरुष आवाजें)
+  { id: 'Puck', label: '👨 पक् (Puck - Natural Male AI Voice)', desc: 'Clear Natural Male Voice', gender: 'male', pitchOffset: 1.0 },
+  { id: 'Charon', label: '👨 कैरोन (Charon - Deep Baritone AI)', desc: 'Deep Male Baritone Voice', gender: 'male', pitchOffset: 0.85 },
+  { id: 'Fenrir', label: '👨 फेनरिर (Fenrir - Expressive Male)', desc: 'Strong Expressive Male Voice', gender: 'male', pitchOffset: 0.95 },
 ];
 
 export default function App() {
@@ -58,37 +57,25 @@ export default function App() {
   const [isSpeaking, setIsSpeaking] = useState(false);
   const [isSynthesizing, setIsSynthesizing] = useState(false);
   const [isRewriting, setIsRewriting] = useState(false);
+  const [showAdvancedSettings, setShowAdvancedSettings] = useState(false);
   const [status, setStatus] = useState<{ msg: string; type: 'info' | 'success' | 'error' } | null>(null);
-  const [history, setHistory] = useState<AudioHistoryItem[]>([]);
   const [audioUrl, setAudioUrl] = useState<string | null>(null);
 
   const [settings, setSettings] = useState<VoiceSettings>({
     lang: 'hi-IN',
-    style: 'normal',
     speed: 1,
     pitch: 1,
     volume: 80,
+    voice: 'Puck'
   });
 
-  const synthRef = useRef<SpeechSynthesis | null>(null);
+  const audioRef = useRef<HTMLAudioElement | null>(null);
+  const audioCtxRef = useRef<AudioContext | null>(null);
+  const sourceNodeRef = useRef<AudioBufferSourceNode | null>(null);
 
   useEffect(() => {
-    synthRef.current = window.speechSynthesis;
-    
-    const loadVoices = () => {
-      if (synthRef.current) synthRef.current.getVoices();
-    };
-
-    loadVoices();
-    if (window.speechSynthesis.onvoiceschanged !== undefined) {
-      window.speechSynthesis.onvoiceschanged = loadVoices;
-    }
-
-    const savedHistory = localStorage.getItem('voicewala_history');
-    if (savedHistory) setHistory(JSON.parse(savedHistory));
-    
     return () => {
-      synthRef.current?.cancel();
+      stop();
     };
   }, []);
 
@@ -97,68 +84,228 @@ export default function App() {
     setTimeout(() => setStatus(null), 4000);
   };
 
-  const speak = () => {
+  const speak = async () => {
     if (!text.trim()) return showStatus('Please enter some text!', 'error');
 
-    synthRef.current?.cancel();
-    const styleObj = STYLES.find(s => s.id === settings.style) || STYLES[0];
-    const langObj = LANGUAGES.find(l => l.code === settings.lang) || LANGUAGES[0];
-    
-    const utterance = new SpeechSynthesisUtterance(text + styleObj.suffix);
-    
-    utterance.lang = settings.lang;
-    utterance.rate = langObj.r * styleObj.r * settings.speed;
-    utterance.pitch = langObj.p * styleObj.p * settings.pitch;
-    utterance.volume = settings.volume / 100;
+    stop();
 
-    // Safety limits for browser TTS
-    utterance.rate = Math.max(0.5, Math.min(2.0, utterance.rate));
-    utterance.pitch = Math.max(0.1, Math.min(2.0, utterance.pitch));
+    const wordCount = text.trim().split(/\s+/).length;
 
-    // Voice Selection
-    if (synthRef.current) {
-      const voices = synthRef.current.getVoices();
-      const preferredVoice = voices.find(v => v.lang === settings.lang) || 
-                            voices.find(v => v.lang.startsWith(settings.lang.split('-')[0]));
-      if (preferredVoice) utterance.voice = preferredVoice;
+    setIsSpeaking(true);
+    if (wordCount > 250) {
+      showStatus(`Generating voice for ${wordCount} words... Please wait.`, 'info');
+    } else {
+      showStatus('Generating natural AI voice...', 'info');
     }
 
-    utterance.onstart = () => setIsSpeaking(true);
-    utterance.onend = () => setIsSpeaking(false);
-    utterance.onerror = (e) => {
-      console.error(e);
-      setIsSpeaking(false);
-      showStatus('Speech Error!', 'error');
-    };
+    try {
+      const response = await fetch('/api/tts', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          text: text,
+          lang: settings.lang,
+          voice: settings.voice
+        })
+      });
+      
+      if (!response.ok) {
+        const errorText = await response.text();
+        throw new Error(errorText || 'API Server Error');
+      }
 
-    synthRef.current?.speak(utterance);
-    addToHistory();
+      const blob = await response.blob();
+
+      // Web Audio API for guaranteed distinct male/female pitch and tone tuning
+      const AudioCtx = window.AudioContext || (window as any).webkitAudioContext;
+      if (AudioCtx) {
+        try {
+          const ctx = new AudioCtx();
+          audioCtxRef.current = ctx;
+
+          const arrayBuffer = await blob.arrayBuffer();
+          const audioBuffer = await ctx.decodeAudioData(arrayBuffer);
+
+          const source = ctx.createBufferSource();
+          source.buffer = audioBuffer;
+          source.playbackRate.value = settings.speed;
+
+          // Pitch shift in cents (100 cents = 1 semitone)
+          let detuneCents = 0;
+          if (settings.voice === 'Charon') {
+            detuneCents = -380; // Deep Baritone Male
+          } else if (settings.voice === 'Puck') {
+            detuneCents = -180; // Clear Natural Male
+          } else if (settings.voice === 'Fenrir') {
+            detuneCents = -240; // Strong Expressive Male
+          } else if (settings.voice === 'Aoede') {
+            detuneCents = +180; // Soft Gentle Female
+          } else if (settings.voice === 'Priya') {
+            detuneCents = +80;  // Confident News Anchor Female
+          } else if (settings.voice === 'Ananya') {
+            detuneCents = +320; // Cheerful Young Girl Voice
+          } else if (settings.voice === 'Kavya') {
+            detuneCents = -60;  // Warm Melodic Storyteller Woman
+          } else if (settings.voice === 'Sunita') {
+            detuneCents = +120; // Professional Corporate Female
+          } else if (settings.voice === 'Riya') {
+            detuneCents = +220; // Upbeat Radio Jockey Female
+          } else if (settings.voice === 'Shalini') {
+            detuneCents = +140; // Clear Teacher Female
+          } else {
+            detuneCents = +20;  // Natural Clear Female (Kore)
+          }
+
+          if (settings.pitch !== 1) {
+            detuneCents += (settings.pitch - 1) * 500;
+          }
+
+          source.detune.value = detuneCents;
+
+          // Frequency equalizer filter for voice realism
+          const filter = ctx.createBiquadFilter();
+          if (settings.voice === 'Charon' || settings.voice === 'Puck' || settings.voice === 'Fenrir') {
+            filter.type = 'lowshelf';
+            filter.frequency.value = 400;
+            filter.gain.value = 6; // Deep male vocal resonance
+          } else if (settings.voice === 'Ananya' || settings.voice === 'Riya') {
+            filter.type = 'highshelf';
+            filter.frequency.value = 3000;
+            filter.gain.value = 5; // Young girl / RJ voice sparkle
+          } else if (settings.voice === 'Kavya') {
+            filter.type = 'peaking';
+            filter.frequency.value = 800;
+            filter.gain.value = 4; // Storyteller warmth
+          } else {
+            filter.type = 'highshelf';
+            filter.frequency.value = 2400;
+            filter.gain.value = 3; // Clear female vocal brilliance
+          }
+
+          const gainNode = ctx.createGain();
+          gainNode.gain.value = settings.volume / 100;
+
+          source.connect(filter);
+          filter.connect(gainNode);
+          gainNode.connect(ctx.destination);
+
+          sourceNodeRef.current = source;
+
+          source.onended = () => {
+            setIsSpeaking(false);
+          };
+
+          source.start(0);
+          setIsSpeaking(true);
+          showStatus('AI Voice started speaking!', 'success');
+          return;
+        } catch (audioErr) {
+          console.warn("Web Audio API processing fallback:", audioErr);
+        }
+      }
+
+      const objectUrl = URL.createObjectURL(blob);
+      const audioObj = new Audio(objectUrl);
+
+      audioObj.volume = settings.volume / 100;
+      audioObj.playbackRate = settings.speed;
+
+      audioObj.oncanplaythrough = () => {
+        audioObj.playbackRate = settings.speed;
+      };
+
+      audioObj.onplay = () => {
+        setIsSpeaking(true);
+      };
+
+      audioObj.onended = () => {
+        setIsSpeaking(false);
+        URL.revokeObjectURL(objectUrl);
+      };
+
+      audioObj.onerror = (e) => {
+        console.error("Audio playback error:", e);
+        setIsSpeaking(false);
+        showStatus('Error playing voice!', 'error');
+        URL.revokeObjectURL(objectUrl);
+      };
+
+      audioRef.current = audioObj;
+      await audioObj.play();
+
+      showStatus('AI Voice started speaking!', 'success');
+    } catch (err: any) {
+      console.error(err);
+      if ('speechSynthesis' in window) {
+        showStatus('Playing voice via fallback synthesizer...', 'info');
+        speakWithBrowserTTS();
+      } else {
+        setIsSpeaking(false);
+        showStatus(`Failed to generate voice: ${err.message}`, 'error');
+      }
+    }
+  };
+
+  const speakWithBrowserTTS = () => {
+    if ('speechSynthesis' in window) {
+      window.speechSynthesis.cancel();
+      const langObj = LANGUAGES.find(l => l.code === settings.lang) || LANGUAGES[0];
+      const voiceObj = AI_VOICES.find(v => v.id === settings.voice) || AI_VOICES[0];
+      
+      const utterance = new SpeechSynthesisUtterance(text);
+      utterance.lang = settings.lang;
+      utterance.rate = langObj.r * settings.speed;
+      utterance.pitch = langObj.p * settings.pitch * voiceObj.pitchOffset;
+      utterance.volume = settings.volume / 100;
+
+      const voices = window.speechSynthesis.getVoices();
+      const langVoices = voices.filter(v => v.lang === settings.lang || v.lang.startsWith(settings.lang.split('-')[0]));
+      
+      const isFemale = voiceObj.id === 'Kore' || voiceObj.id === 'Aoede';
+      let preferredVoice = langVoices.find(v => 
+        isFemale ? (v.name.includes('Female') || v.name.includes('Google') || v.name.includes('Natural'))
+                 : (v.name.includes('Male') || v.name.includes('David') || v.name.includes('Mark'))
+      ) || langVoices[0];
+
+      if (preferredVoice) utterance.voice = preferredVoice;
+
+      utterance.onstart = () => setIsSpeaking(true);
+      utterance.onend = () => setIsSpeaking(false);
+      utterance.onerror = () => {
+        setIsSpeaking(false);
+        showStatus('Speech Error!', 'error');
+      };
+
+      window.speechSynthesis.speak(utterance);
+    }
   };
 
   const stop = () => {
-    synthRef.current?.cancel();
+    if (sourceNodeRef.current) {
+      try { sourceNodeRef.current.stop(); } catch(e) {}
+      sourceNodeRef.current = null;
+    }
+    if (audioCtxRef.current) {
+      try { audioCtxRef.current.close(); } catch(e) {}
+      audioCtxRef.current = null;
+    }
+    if (audioRef.current) {
+      audioRef.current.pause();
+      audioRef.current = null;
+    }
+    if ('speechSynthesis' in window) {
+      window.speechSynthesis.cancel();
+    }
     setIsSpeaking(false);
-  };
-
-  const addToHistory = () => {
-    const newItem: AudioHistoryItem = {
-      id: Date.now().toString(),
-      text: text.slice(0, 50),
-      settings: { ...settings },
-      timestamp: Date.now(),
-    };
-    const updated = [newItem, ...history].slice(0, 10);
-    setHistory(updated);
-    localStorage.setItem('voicewala_history', JSON.stringify(updated));
   };
 
   const handleRewrite = async () => {
     if (!text.trim()) return;
     setIsRewriting(true);
     try {
-      const rewritten = await rewriteText(text, settings.style, settings.lang);
+      const rewritten = await rewriteText(text, 'natural', settings.lang);
       setText(rewritten);
-      showStatus('AI Magic applied!', 'success');
+      showStatus('Text rewritten with AI magic!', 'success');
     } catch (e) {
       showStatus('AI Rewrite failed', 'error');
     } finally {
@@ -166,19 +313,30 @@ export default function App() {
     }
   };
 
-  // Improved Synthesizer for Download (MP3)
   const generateDownload = async () => {
     if (!text.trim()) return showStatus('Write text first!', 'error');
     setIsSynthesizing(true);
     
-    try {
-      const styleObj = STYLES.find(s => s.id === settings.style) || STYLES[0];
-      const langCode = settings.lang.split('-')[0];
-      const finalText = text + styleObj.suffix;
+    const wordCount = text.trim().split(/\s+/).length;
+    if (wordCount > 250) {
+      showStatus(`Preparing audio download for ${wordCount} words...`, 'info');
+    }
 
-      const response = await fetch(`/api/tts?text=${encodeURIComponent(finalText)}&lang=${langCode}`);
+    try {
+      const response = await fetch('/api/tts', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          text: text,
+          lang: settings.lang,
+          voice: settings.voice
+        })
+      });
       
       if (!response.ok) throw new Error('API Error');
+
+      const contentType = response.headers.get('content-type') || '';
+      const ext = contentType.includes('mpeg') || contentType.includes('mp3') ? 'mp3' : 'wav';
 
       const blob = await response.blob();
       const url = URL.createObjectURL(blob);
@@ -186,10 +344,10 @@ export default function App() {
 
       const a = document.createElement('a');
       a.href = url;
-      a.download = `voicewala_${Date.now()}.mp3`;
+      a.download = `voicewala_${settings.voice}_${Date.now()}.${ext}`;
       a.click();
       
-      showStatus('Real Voice Download Ready!', 'success');
+      showStatus('Audio download started!', 'success');
     } catch (e) {
       console.error(e);
       showStatus('Download Error', 'error');
@@ -199,273 +357,250 @@ export default function App() {
   };
 
   return (
-    <div className="min-h-screen font-sans selection:bg-brand-primary/30">
-      {/* Background Decor */}
-      <div className="fixed inset-0 -z-10 bg-[radial-gradient(circle_at_top_right,_var(--color-slate-900),_transparent)] opacity-40" />
-      <div className="fixed top-20 left-10 w-72 h-72 bg-brand-primary/10 rounded-full blur-[120px] animate-pulse-slow" />
-      <div className="fixed bottom-20 right-10 w-96 h-96 bg-brand-accent/10 rounded-full blur-[120px] animate-pulse-slow" />
+    <div className="min-h-screen font-sans selection:bg-indigo-500/20 text-slate-900 bg-slate-100">
+      {/* Background Gradient */}
+      <div className="fixed inset-0 -z-10 bg-gradient-to-b from-indigo-50/70 via-slate-100 to-slate-100 pointer-events-none" />
 
-      <main className="container max-w-5xl mx-auto px-4 py-8 md:py-12">
+      <main className="container max-w-3xl mx-auto px-4 py-8 md:py-12">
         {/* Header */}
-        <header id="app-header" className="flex flex-col items-center mb-10 text-center">
+        <header id="app-header" className="flex flex-col items-center mb-8 text-center">
           <motion.div 
             id="logo-icon"
-            initial={{ scale: 0.8, opacity: 0 }}
+            initial={{ scale: 0.9, opacity: 0 }}
             animate={{ scale: 1, opacity: 1 }}
-            className="w-16 h-16 bg-gradient-to-tr from-brand-primary to-brand-secondary rounded-2xl flex items-center justify-center mb-4 shadow-xl glow-primary"
+            className="w-14 h-14 bg-indigo-600 rounded-2xl flex items-center justify-center mb-3 shadow-lg shadow-indigo-500/30"
           >
-            <Mic2 className="w-8 h-8 text-white" />
+            <Mic2 className="w-7 h-7 text-white" />
           </motion.div>
           <motion.h1 
             id="main-title"
-            initial={{ y: 20, opacity: 0 }}
+            initial={{ y: 10, opacity: 0 }}
             animate={{ y: 0, opacity: 1 }}
-            className="text-4xl md:text-5xl font-extrabold tracking-tighter bg-clip-text text-transparent bg-gradient-to-b from-white to-slate-400 mb-2"
+            className="text-3xl md:text-4xl font-black tracking-tight text-slate-900"
           >
             VOICEWALA
           </motion.h1>
-          <p id="app-subtitle" className="text-slate-400 font-medium">Professional AI Voice Morphing & Synthesis</p>
+          <p id="app-subtitle" className="text-sm text-slate-600 font-bold mt-1">Simple & Powerful AI Text to Speech</p>
         </header>
 
-        <div className="grid grid-cols-1 lg:grid-cols-12 gap-8">
-          {/* Main Controls - 8 cols */}
-          <div className="lg:col-span-8 space-y-6">
-            {/* Text Editor */}
-            <section id="editor-section" className="glass rounded-2xl md:rounded-3xl p-6 relative group">
-              <div className="flex items-center justify-between mb-4">
-                <label className="text-sm font-semibold text-slate-300 flex items-center gap-2">
-                  <Activity className="w-4 h-4 text-brand-accent" /> Input Content
-                </label>
-                <div className="flex gap-2">
-                  <motion.button
-                    id="rewrite-btn"
-                    whileHover={{ scale: 1.05 }}
-                    whileTap={{ scale: 0.95 }}
-                    onClick={handleRewrite}
-                    disabled={isRewriting || !text}
-                    className="flex items-center gap-2 px-3 py-1.5 bg-brand-primary/20 hover:bg-brand-primary/30 text-brand-primary rounded-lg text-xs font-bold transition-all disabled:opacity-50"
-                  >
-                    {isRewriting ? <Loader2 className="w-3 h-3 animate-spin" /> : <Wand2 className="w-3 h-3" />}
-                    Smart Rewrite
-                  </motion.button>
-                  <button id="clear-text-btn" onClick={() => setText('')} className="p-1.5 hover:bg-white/5 rounded-lg text-slate-500 hover:text-red-400 transition-colors">
-                    <Trash2 className="w-4 h-4" />
-                  </button>
-                </div>
-              </div>
-              <textarea
-                id="main-textarea"
-                value={text}
-                onChange={(e) => setText(e.target.value)}
-                placeholder="Type anything... e.g., Hello, how can I help you today?"
-                className="w-full bg-slate-950/50 border border-white/5 rounded-xl p-4 text-lg text-white placeholder:text-slate-600 focus:outline-none focus:ring-2 focus:ring-brand-primary/40 min-h-[160px] resize-none transition-all"
-              />
-              <div className="mt-2 text-[10px] uppercase tracking-widest text-slate-500 flex justify-between font-mono">
-                <span>{text.length} Characters</span>
-                <span className="text-brand-accent">Live Preview Ready</span>
-              </div>
-            </section>
-
-            {/* Voice Settings Grid */}
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-              <section className="glass rounded-2xl p-5">
-                <h3 className="text-xs font-bold text-slate-500 uppercase tracking-widest mb-4 flex items-center gap-2">
-                  <Languages className="w-4 h-4" /> Tone & Language
-                </h3>
-                <div className="space-y-4">
-                  <div>
-                    <label className="text-xs font-semibold text-slate-400 mb-2 block">Language</label>
-                    <select 
-                      value={settings.lang}
-                      onChange={(e) => setSettings({...settings, lang: e.target.value})}
-                      className="w-full bg-slate-900 border border-white/5 rounded-xl p-2.5 text-sm"
-                    >
-                      {LANGUAGES.map(l => <option key={l.code} value={l.code}>{l.label} ({l.native})</option>)}
-                    </select>
-                  </div>
-                  <div>
-                    <label className="text-xs font-semibold text-slate-400 mb-2 block">Voice Character</label>
-                    <div className="grid grid-cols-4 gap-2">
-                      {STYLES.map(s => (
-                        <button
-                          key={s.id}
-                          onClick={() => setSettings({...settings, style: s.id})}
-                          className={`flex flex-col items-center justify-center p-2 rounded-xl border transition-all ${
-                            settings.style === s.id 
-                            ? 'bg-brand-primary border-brand-primary text-white shadow-lg shadow-brand-primary/20' 
-                            : 'bg-slate-900 border-white/5 hover:border-brand-primary/50 text-slate-400'
-                          }`}
-                        >
-                          <span className="text-xl mb-1">{s.icon}</span>
-                          <span className="text-[10px] font-bold truncate w-full text-center">{s.label}</span>
-                        </button>
-                      ))}
-                    </div>
-                  </div>
-                </div>
-              </section>
-
-              <section className="glass rounded-2xl p-5">
-                <h3 className="text-xs font-bold text-slate-500 uppercase tracking-widest mb-4 flex items-center gap-2">
-                  <Settings className="w-4 h-4" /> Parameters
-                </h3>
-                <div className="space-y-6">
-                  <div className="space-y-2">
-                    <div className="flex justify-between text-[10px] font-bold text-slate-400 uppercase tracking-tighter">
-                      <span className="flex items-center gap-1"><FastForward className="w-3 h-3" /> Speed</span>
-                      <span className="text-brand-accent">{settings.speed}x</span>
-                    </div>
-                    <input 
-                      type="range" min="0.5" max="2" step="0.1" value={settings.speed}
-                      onChange={(e) => setSettings({...settings, speed: parseFloat(e.target.value)})}
-                      className="w-full h-1.5 bg-slate-800 rounded-lg appearance-none cursor-pointer accent-brand-primary"
-                    />
-                  </div>
-                  <div className="space-y-2">
-                    <div className="flex justify-between text-[10px] font-bold text-slate-400 uppercase tracking-tighter">
-                      <span className="flex items-center gap-1"><Music className="w-3 h-3" /> Pitch</span>
-                      <span className="text-brand-accent">{settings.pitch}x</span>
-                    </div>
-                    <input 
-                      type="range" min="0.5" max="2" step="0.1" value={settings.pitch}
-                      onChange={(e) => setSettings({...settings, pitch: parseFloat(e.target.value)})}
-                      className="w-full h-1.5 bg-slate-800 rounded-lg appearance-none cursor-pointer accent-brand-accent"
-                    />
-                  </div>
-                  <div className="space-y-2">
-                    <div className="flex justify-between text-[10px] font-bold text-slate-400 uppercase tracking-tighter">
-                      <span className="flex items-center gap-1"><Volume2 className="w-3 h-3" /> Volume</span>
-                      <span className="text-brand-accent">{settings.volume}%</span>
-                    </div>
-                    <input 
-                      type="range" min="0" max="100" value={settings.volume}
-                      onChange={(e) => setSettings({...settings, volume: parseInt(e.target.value)})}
-                      className="w-full h-1.5 bg-slate-800 rounded-lg appearance-none cursor-pointer accent-brand-secondary"
-                    />
-                  </div>
-                </div>
-              </section>
-            </div>
-
-            {/* Action Bar */}
-            <div id="action-bar" className="flex flex-wrap gap-4 items-center justify-between glass rounded-2xl p-4">
-              <div className="flex gap-2">
-                {!isSpeaking ? (
-                  <motion.button
-                    id="speak-btn"
-                    whileHover={{ scale: 1.02 }}
-                    whileTap={{ scale: 0.98 }}
-                    onClick={speak}
-                    className="px-6 py-3 bg-brand-primary hover:bg-brand-primary/90 text-white rounded-xl font-bold flex items-center gap-2 shadow-lg glow-primary transition-all"
-                  >
-                    <Play className="w-4 h-4 fill-current" /> Speak
-                  </motion.button>
-                ) : (
-                  <motion.button
-                    id="stop-btn"
-                    whileHover={{ scale: 1.02 }}
-                    whileTap={{ scale: 0.98 }}
-                    onClick={stop}
-                    className="px-6 py-3 bg-red-500 hover:bg-red-600 text-white rounded-xl font-bold flex items-center gap-2 shadow-lg shadow-red-500/20 transition-all"
-                  >
-                    <Square className="w-4 h-4 fill-current" /> Stop
-                  </motion.button>
-                )}
-              </div>
-
-              <div className="flex gap-2">
+        {/* Clean Single-Column Core Container */}
+        <div className="space-y-5">
+          {/* Main Text Area Card */}
+          <section id="editor-section" className="bg-white rounded-2xl p-5 md:p-6 border-2 border-slate-200 shadow-md relative">
+            <div className="flex items-center justify-between gap-2 mb-3">
+              <span className="text-xs font-bold text-slate-700 flex items-center gap-2 uppercase tracking-wide">
+                <Activity className="w-4 h-4 text-indigo-600" /> Text Editor
+              </span>
+              <div className="flex items-center gap-2">
                 <motion.button
-                  id="export-btn"
-                  whileHover={{ scale: 1.02 }}
-                  whileTap={{ scale: 0.98 }}
-                  disabled={isSynthesizing}
-                  onClick={generateDownload}
-                  className="px-4 py-3 bg-slate-800 hover:bg-slate-700 text-white rounded-xl font-bold flex items-center gap-2 border border-white/5 disabled:opacity-50"
+                  id="rewrite-btn"
+                  whileHover={{ scale: 1.03 }}
+                  whileTap={{ scale: 0.97 }}
+                  onClick={handleRewrite}
+                  disabled={isRewriting || !text}
+                  className="flex items-center gap-1.5 px-3 py-1.5 bg-indigo-50 hover:bg-indigo-100 text-indigo-700 rounded-lg text-xs font-bold transition-all border border-indigo-200 disabled:opacity-40"
                 >
-                  {isSynthesizing ? <Loader2 className="w-4 h-4 animate-spin" /> : <Download className="w-4 h-4" />}
-                  Export WAV
+                  {isRewriting ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Wand2 className="w-3.5 h-3.5" />}
+                  Smart Rewrite
                 </motion.button>
+
+                <button 
+                  id="clear-text-btn" 
+                  onClick={() => setText('')} 
+                  title="Clear text"
+                  className="p-1.5 hover:bg-red-50 rounded-lg text-slate-500 hover:text-red-600 transition-colors"
+                >
+                  <Trash2 className="w-4 h-4" />
+                </button>
               </div>
             </div>
 
-            {/* Status Feed */}
+            <textarea
+              id="main-textarea"
+              value={text}
+              onChange={(e) => setText(e.target.value)}
+              placeholder="यहाँ टेक्स्ट लिखें या पेस्ट करें... Type or paste any text here..."
+              className="w-full bg-slate-50 border-2 border-slate-300 focus:bg-white rounded-xl p-4 text-base md:text-lg text-slate-900 placeholder:text-slate-400 focus:outline-none focus:border-indigo-600 focus:ring-2 focus:ring-indigo-500/20 min-h-[170px] resize-none transition-all leading-relaxed font-medium"
+            />
+
+            <div className="mt-2 text-xs font-mono text-slate-600 font-bold flex justify-between items-center">
+              <span>{text.trim() ? text.trim().split(/\s+/).length : 0} Words | {text.length} Chars</span>
+              <span className="text-emerald-700 font-bold">Auto Long Text Processing</span>
+            </div>
+          </section>
+
+          {/* Essential Quick Controls */}
+          <div className="bg-white rounded-2xl p-4 border-2 border-slate-200 shadow-md grid grid-cols-1 md:grid-cols-2 gap-3">
+            <div>
+              <label className="text-xs font-bold text-slate-700 mb-1.5 block flex items-center gap-1.5">
+                <Languages className="w-4 h-4 text-indigo-600" /> Select Language
+              </label>
+              <select 
+                value={settings.lang}
+                onChange={(e) => setSettings({...settings, lang: e.target.value})}
+                className="w-full bg-slate-50 border-2 border-slate-300 rounded-xl p-3 text-sm font-bold text-slate-900 focus:outline-none focus:border-indigo-600 focus:bg-white cursor-pointer shadow-sm"
+              >
+                {LANGUAGES.map(l => <option key={l.code} value={l.code}>{l.label} ({l.native})</option>)}
+              </select>
+            </div>
+
+            <div>
+              <label className="text-xs font-bold text-slate-700 mb-1.5 block flex items-center justify-between">
+                <span className="flex items-center gap-1.5"><Mic2 className="w-4 h-4 text-indigo-600" /> Select Voice</span>
+                <span className="text-[10px] font-bold text-indigo-700 uppercase bg-indigo-100 px-2 py-0.5 rounded border border-indigo-200">AI Voice</span>
+              </label>
+              <select 
+                value={settings.voice}
+                onChange={(e) => setSettings({...settings, voice: e.target.value})}
+                className="w-full bg-slate-50 border-2 border-slate-300 rounded-xl p-3 text-sm font-bold text-slate-900 focus:outline-none focus:border-indigo-600 focus:bg-white cursor-pointer shadow-sm"
+              >
+                <optgroup label="👩 महिला आवाजें (Female / Ladies Voices)">
+                  {AI_VOICES.filter(v => v.gender === 'female').map(v => (
+                    <option key={v.id} value={v.id}>{v.label} — {v.desc}</option>
+                  ))}
+                </optgroup>
+                <optgroup label="👨 पुरुष आवाजें (Male Voices)">
+                  {AI_VOICES.filter(v => v.gender === 'male').map(v => (
+                    <option key={v.id} value={v.id}>{v.label} — {v.desc}</option>
+                  ))}
+                </optgroup>
+              </select>
+            </div>
+          </div>
+
+          {/* Collapsible Speed & Audio Sliders */}
+          <div className="bg-white rounded-2xl border-2 border-slate-200 shadow-md overflow-hidden">
+            <button
+              onClick={() => setShowAdvancedSettings(!showAdvancedSettings)}
+              className="w-full px-4 py-3 bg-slate-100 hover:bg-slate-200 transition-colors flex items-center justify-between text-xs font-bold uppercase tracking-wider text-slate-800"
+            >
+              <span className="flex items-center gap-2">
+                <SlidersHorizontal className="w-4 h-4 text-indigo-600" /> Audio Speed & Pitch Controls
+              </span>
+              {showAdvancedSettings ? <ChevronUp className="w-4 h-4 text-slate-700" /> : <ChevronDown className="w-4 h-4 text-slate-700" />}
+            </button>
+
             <AnimatePresence>
-              {status && (
+              {showAdvancedSettings && (
                 <motion.div
-                  initial={{ opacity: 0, scale: 0.9 }}
-                  animate={{ opacity: 1, scale: 1 }}
-                  exit={{ opacity: 0, scale: 0.9 }}
-                  className={`p-3 rounded-xl flex items-center gap-3 font-medium text-sm ${
-                    status.type === 'success' ? 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/20' :
-                    status.type === 'error' ? 'bg-red-500/10 text-red-400 border border-red-500/20' :
-                    'bg-brand-primary/10 text-brand-primary border border-brand-primary/20'
-                  }`}
+                  initial={{ height: 0, opacity: 0 }}
+                  animate={{ height: 'auto', opacity: 1 }}
+                  exit={{ height: 0, opacity: 0 }}
+                  className="p-5 border-t border-slate-200 bg-slate-50"
                 >
-                  <div className={`w-2 h-2 rounded-full ${
-                    status.type === 'success' ? 'bg-emerald-400 animate-pulse' :
-                    status.type === 'error' ? 'bg-red-400' :
-                    'bg-brand-primary animate-pulse'
-                  }`} />
-                  {status.msg}
+                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+                    <div className="space-y-1.5">
+                      <div className="flex justify-between text-xs font-bold text-slate-700">
+                        <span className="flex items-center gap-1"><FastForward className="w-3.5 h-3.5 text-indigo-600" /> Speed</span>
+                        <span className="text-indigo-700 font-mono font-bold">{settings.speed}x</span>
+                      </div>
+                      <input 
+                        type="range" min="0.5" max="2" step="0.1" value={settings.speed}
+                        onChange={(e) => setSettings({...settings, speed: parseFloat(e.target.value)})}
+                        className="w-full h-2 bg-slate-200 rounded-lg appearance-none cursor-pointer accent-indigo-600"
+                      />
+                    </div>
+
+                    <div className="space-y-1.5">
+                      <div className="flex justify-between text-xs font-bold text-slate-700">
+                        <span className="flex items-center gap-1"><Music className="w-3.5 h-3.5 text-indigo-600" /> Pitch</span>
+                        <span className="text-indigo-700 font-mono font-bold">{settings.pitch}x</span>
+                      </div>
+                      <input 
+                        type="range" min="0.5" max="2" step="0.1" value={settings.pitch}
+                        onChange={(e) => setSettings({...settings, pitch: parseFloat(e.target.value)})}
+                        className="w-full h-2 bg-slate-200 rounded-lg appearance-none cursor-pointer accent-indigo-600"
+                      />
+                    </div>
+
+                    <div className="space-y-1.5">
+                      <div className="flex justify-between text-xs font-bold text-slate-700">
+                        <span className="flex items-center gap-1"><Volume2 className="w-3.5 h-3.5 text-indigo-600" /> Volume</span>
+                        <span className="text-indigo-700 font-mono font-bold">{settings.volume}%</span>
+                      </div>
+                      <input 
+                        type="range" min="0" max="100" value={settings.volume}
+                        onChange={(e) => setSettings({...settings, volume: parseInt(e.target.value)})}
+                        className="w-full h-2 bg-slate-200 rounded-lg appearance-none cursor-pointer accent-indigo-600"
+                      />
+                    </div>
+                  </div>
                 </motion.div>
               )}
             </AnimatePresence>
           </div>
 
-          {/* Sidebar - 4 cols */}
-          <aside className="lg:col-span-4 space-y-6">
-            <section className="glass rounded-2xl p-6 h-full">
-              <div className="flex items-center gap-2 mb-6">
-                <History className="w-5 h-5 text-brand-accent" />
-                <h2 className="font-bold text-slate-200">Recent Creations</h2>
-              </div>
-              
-              <div className="space-y-3">
-                {history.length > 0 ? history.map((item) => (
-                  <div key={item.id} className="p-3 bg-white/5 border border-white/5 rounded-xl hover:bg-white/10 transition-all cursor-pointer group">
-                    <div className="flex justify-between items-start mb-1">
-                      <span className="text-[10px] text-brand-accent font-bold uppercase">{item.settings.style} • {item.settings.lang.split('-')[0]}</span>
-                      <span className="text-[10px] text-slate-500">{new Date(item.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</span>
-                    </div>
-                    <p className="text-sm text-slate-300 line-clamp-2 leading-snug group-hover:text-white transition-colors">{item.text}</p>
-                  </div>
-                )) : (
-                  <div className="flex flex-col items-center justify-center py-12 text-slate-600">
-                    <Music className="w-12 h-12 mb-2 opacity-20" />
-                    <p className="text-xs font-medium italic">No history yet</p>
-                  </div>
-                )}
-              </div>
+          {/* Action Bar */}
+          <div id="action-bar" className="flex flex-wrap gap-3 items-center justify-between bg-white rounded-2xl p-4 border-2 border-slate-200 shadow-md">
+            <div className="flex gap-2 w-full sm:w-auto">
+              {!isSpeaking ? (
+                <motion.button
+                  id="speak-btn"
+                  whileHover={{ scale: 1.02 }}
+                  whileTap={{ scale: 0.98 }}
+                  onClick={speak}
+                  className="flex-1 sm:flex-initial px-8 py-3 bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl font-bold flex items-center justify-center gap-2 shadow-md shadow-indigo-600/30 transition-all text-base cursor-pointer"
+                >
+                  <Play className="w-5 h-5 fill-current" /> Speak Voice
+                </motion.button>
+              ) : (
+                <motion.button
+                  id="stop-btn"
+                  whileHover={{ scale: 1.02 }}
+                  whileTap={{ scale: 0.98 }}
+                  onClick={stop}
+                  className="flex-1 sm:flex-initial px-8 py-3 bg-red-600 hover:bg-red-700 text-white rounded-xl font-bold flex items-center justify-center gap-2 shadow-md shadow-red-600/30 transition-all text-base cursor-pointer"
+                >
+                  <Square className="w-5 h-5 fill-current" /> Stop
+                </motion.button>
+              )}
+            </div>
 
-              <div className="mt-8 p-4 bg-brand-primary/5 rounded-2xl border border-brand-primary/10">
-                <div className="flex items-center gap-2 mb-2">
-                  <Info className="w-4 h-4 text-brand-primary" />
-                  <h4 className="text-xs font-bold text-slate-300 uppercase">Usage Tip</h4>
-                </div>
-                <p className="text-[11px] text-slate-400 leading-relaxed">
-                  Combine <strong>Smart Rewrite</strong> with different <strong>Voice Characters</strong> to get unique emotional results. Exported WAV files include high-quality synthesis data.
-                </p>
-              </div>
-            </section>
-          </aside>
+            <motion.button
+              id="export-btn"
+              whileHover={{ scale: 1.02 }}
+              whileTap={{ scale: 0.98 }}
+              disabled={isSynthesizing}
+              onClick={generateDownload}
+              className="w-full sm:w-auto px-5 py-3 bg-slate-900 hover:bg-black text-white rounded-xl font-bold flex items-center justify-center gap-2 shadow-md disabled:opacity-50 text-sm cursor-pointer"
+            >
+              {isSynthesizing ? <Loader2 className="w-4 h-4 animate-spin" /> : <Download className="w-4 h-4" />}
+              Download Audio
+            </motion.button>
+          </div>
+
+          {/* Status Message */}
+          <AnimatePresence>
+            {status && (
+              <motion.div
+                initial={{ opacity: 0, y: -5 }}
+                animate={{ opacity: 1, y: 0 }}
+                exit={{ opacity: 0, y: -5 }}
+                className={`p-3.5 rounded-xl flex items-center gap-3 font-bold text-xs md:text-sm border-2 ${
+                  status.type === 'success' ? 'bg-emerald-50 text-emerald-800 border-emerald-300' :
+                  status.type === 'error' ? 'bg-red-50 text-red-800 border-red-300' :
+                  'bg-indigo-50 text-indigo-900 border-indigo-300'
+                }`}
+              >
+                <div className={`w-2.5 h-2.5 rounded-full ${
+                  status.type === 'success' ? 'bg-emerald-600 animate-pulse' :
+                  status.type === 'error' ? 'bg-red-600' :
+                  'bg-indigo-600 animate-pulse'
+                }`} />
+                {status.msg}
+              </motion.div>
+            )}
+          </AnimatePresence>
         </div>
 
-        {/* Footer */}
-        <footer className="mt-20 pt-8 border-t border-white/5 flex flex-col md:flex-row items-center justify-between gap-4 text-slate-500">
-          <div className="flex items-center gap-6">
-            <div className="flex items-center gap-2">
-              <div className="w-6 h-6 bg-slate-800 rounded-lg flex items-center justify-center">
-                <Github className="w-3 h-3" />
-              </div>
-              <span className="text-[10px] font-bold tracking-widest uppercase">Open Source</span>
-            </div>
-            <div className="flex items-center gap-2">
-              <Share2 className="w-3 h-3" />
-              <span className="text-[10px] font-bold tracking-widest uppercase">Community Powered</span>
-            </div>
+        {/* Clean Minimal Footer */}
+        <footer className="mt-16 pt-6 border-t border-slate-300 flex flex-col sm:flex-row items-center justify-between gap-3 text-slate-600 text-xs">
+          <div className="flex items-center gap-2">
+            <Mic2 className="w-4 h-4 text-indigo-600" />
+            <span className="font-bold text-slate-700">Voicewala AI Studio</span>
           </div>
-          <div className="text-[10px] font-mono">
-            &copy; {new Date().getFullYear()} VOICEWALA SYSTEM v2.0.4-LATEST
+          <div className="font-mono text-[10px] font-bold text-slate-500">
+            &copy; {new Date().getFullYear()} VOICEWALA SYSTEM
           </div>
         </footer>
       </main>

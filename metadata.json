@@ -1,6 +1,8 @@
 {
-  "name": "Remix: VOICEWALA - AI Voice Morphing \u0026 TTS",
-  "description": "Professional Text-to-Speech platform with AI-powered mood rewriting, multiple languages, and direct audio export.",
+  "name": "VOICEWALA - AI Voice & TTS Generator",
+  "description": "Professional Text-to-Speech platform with AI voice generation, multiple natural voices, pitch & rate controls, and audio export.",
   "requestFramePermissions": [],
-  "majorCapabilities": []
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
 }
