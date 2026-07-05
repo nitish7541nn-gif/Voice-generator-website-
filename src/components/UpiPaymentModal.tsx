@@ -65,8 +65,8 @@ export default function UpiPaymentModal({ isOpen, onClose, onSuccessStatus, onPl
     }
   };
 
-  // Standard NPCI compliant UPI URI
-  const upiUri = `upi://pay?pa=${encodeURIComponent(cleanUpi)}&pn=${encodeURIComponent(cleanName)}&am=${amountFormatted}&cu=INR&tn=${encodeURIComponent('Voicewala AI Recharge')}&tr=VW${Date.now()}`;
+  // Standard NPCI compliant UPI URI (Without hardcoded pn parameter to prevent 'Check receiver details' name mismatch errors in PhonePe/GPay/Navi)
+  const upiUri = `upi://pay?pa=${encodeURIComponent(cleanUpi)}&am=${amountFormatted}&cu=INR`;
   
   // QR Code URL via QRServer API (strictly formatted)
   const qrCodeUrl = `https://api.qrserver.com/v1/create-qr-code/?size=260x260&data=${encodeURIComponent(upiUri)}&margin=10`;
@@ -82,11 +82,11 @@ export default function UpiPaymentModal({ isOpen, onClose, onSuccessStatus, onPl
     setTimeout(() => setCopied(false), 3000);
 
     if (onSuccessStatus) {
-      onSuccessStatus(`UPI ID (${cleanUpi}) copied! Opening ${appName}...`);
+      onSuccessStatus(`Navi UPI ID (${cleanUpi}) copied! Opening ${appName}...`);
     }
 
     const isAndroid = /Android/i.test(navigator.userAgent);
-    const baseParams = `pa=${encodeURIComponent(cleanUpi)}&pn=${encodeURIComponent(cleanName)}&am=${amountFormatted}&cu=INR&tn=${encodeURIComponent('Voicewala AI')}&tr=VW${Date.now()}`;
+    const baseParams = `pa=${encodeURIComponent(cleanUpi)}&am=${amountFormatted}&cu=INR`;
 
     if (isAndroid && packageName) {
       // Android Intent protocol directly targets app without triggering "Invalid UPI link"
@@ -322,8 +322,13 @@ export default function UpiPaymentModal({ isOpen, onClose, onSuccessStatus, onPl
                     <ArrowRight className="w-4 h-4" />
                   </button>
 
-                  <div className="mt-2.5 p-2.5 bg-amber-50 border border-amber-200/90 rounded-2xl text-[11px] text-amber-900 font-medium leading-relaxed">
-                    💡 <b>अगर ऐप में "Invalid UPI" एरर आए:</b> बटन दबाते ही UPI ID (<span className="font-mono font-bold">{cleanUpi}</span>) automatically Copy हो जाती है। अपने PhonePe / GPay / Navi में <b>"Pay to UPI ID"</b> ऑप्शन में जाकर <span className="font-mono font-bold">{cleanUpi}</span> पे या पेस्ट करके ₹{amount} भेजें।
+                  <div className="mt-2.5 p-2.5 bg-amber-50 border border-amber-200/90 rounded-2xl text-[11px] text-amber-900 font-medium leading-relaxed space-y-1">
+                    <div>
+                      💡 <b>अगर 'Check Receiver Details' या 'Invalid UPI' का मैसेज आए:</b>
+                    </div>
+                    <div>
+                      यह बैंक की सामान्य सुरक्षा चेतावनी होती है। Navi UPI ID (<span className="font-mono font-bold text-indigo-700">{cleanUpi}</span>) बटन दबाते ही ऑटोमैटिक कॉपी हो जाती है। आप अपने PhonePe / GPay / Navi / Paytm ऐप में <b>"To UPI ID"</b> विकल्प में जाकर <span className="font-mono font-bold text-indigo-700">{cleanUpi}</span> पेस्ट करके <b>₹{amount}</b> आसानी से ट्रांसफर कर सकते हैं।
+                    </div>
                   </div>
                 </div>
 
@@ -331,7 +336,7 @@ export default function UpiPaymentModal({ isOpen, onClose, onSuccessStatus, onPl
                 <div className="bg-slate-50 border-2 border-slate-200 rounded-2xl p-4 text-center">
                   <div className="text-xs font-bold text-slate-700 mb-2 flex items-center justify-center gap-1.5">
                     <QrCode className="w-4 h-4 text-indigo-600" />
-                    <span>Or Scan QR Code (GPay / PhonePe / Paytm)</span>
+                    <span>Scan QR Code or Copy Navi UPI ID</span>
                   </div>
 
                   <div className="inline-block p-3 bg-white rounded-2xl border-2 border-slate-200 shadow-md">
@@ -347,16 +352,16 @@ export default function UpiPaymentModal({ isOpen, onClose, onSuccessStatus, onPl
 
                   {/* Copy UPI ID */}
                   <div className="mt-3 flex items-center justify-center gap-2">
-                    <span className="text-xs font-bold text-slate-500">UPI ID:</span>
-                    <code className="text-xs font-mono font-bold text-slate-800 bg-slate-200 px-2.5 py-1 rounded-lg">
+                    <span className="text-xs font-bold text-slate-500">Navi UPI ID:</span>
+                    <code className="text-xs font-mono font-bold text-indigo-900 bg-indigo-50 border border-indigo-200 px-2.5 py-1 rounded-lg">
                       {cleanUpi}
                     </code>
                     <button
                       onClick={copyUpi}
-                      className="p-1.5 bg-indigo-50 hover:bg-indigo-100 text-indigo-700 rounded-lg border border-indigo-200 transition-all cursor-pointer text-xs flex items-center gap-1 font-bold"
+                      className="p-1.5 bg-indigo-600 hover:bg-indigo-700 text-white rounded-lg transition-all cursor-pointer text-xs flex items-center gap-1 font-bold shadow-xs"
                     >
-                      {copied ? <Check className="w-3.5 h-3.5 text-emerald-600" /> : <Copy className="w-3.5 h-3.5" />}
-                      {copied ? 'Copied' : 'Copy'}
+                      {copied ? <Check className="w-3.5 h-3.5 text-emerald-300" /> : <Copy className="w-3.5 h-3.5" />}
+                      {copied ? 'Copied!' : 'Copy ID'}
                     </button>
                   </div>
                 </div>
