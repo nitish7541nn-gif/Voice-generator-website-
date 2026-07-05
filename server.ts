@@ -282,7 +282,7 @@ async function generateAudioForChunk(
   for (let attempt = 0; attempt <= maxRetries; attempt++) {
     try {
       const response = await getGeminiClient().models.generateContent({
-        model: "gemini-3.1-flash-tts-preview",
+        model: "gemini-2.5-flash",
         contents: [{ parts: [{ text: voicePrompt }] }],
         config: {
           responseModalities: [Modality.AUDIO],
@@ -334,6 +334,20 @@ async function generateFullAudio(text: string, voice: string): Promise<Buffer> {
   return addWavHeader(combinedPcm, sampleRate);
 }
 
+// Helper function to detect adult / sexually explicit content
+function containsAdultContent(text: string): boolean {
+  if (!text) return false;
+  const lower = text.toLowerCase();
+  
+  const explicitPatterns = [
+    /\b(sex|sexual|sexuality|intercourse|porn|porno|pornography|orgasm|erotic|erotica|ejaculation|nude|nudity|naked|boobs|vagina|penis|dick|clitoris|masturbat\w*|hentai|xx+|xvideos|xnxx)\b/i,
+    /\b(चोद|चोदना|चुदाई|गांड|लंड|भोसड़ा|भोसडी|छिनाल|रंडी|मुठ|अश्लील|पोर्न|सिक्स|सेक्स|कामुक|यौन|वयस्क|संभोग|कामुकता|मैथुन)\b/i,
+    /\b(chut|gaand|gand|lund|lauda|bhosda|chudai|chodna|raand|randi|muth|bhosdike|sax|saxx|sexx)\b/i
+  ];
+
+  return explicitPatterns.some((pattern) => pattern.test(lower));
+}
+
 async function startServer() {
   const app = express();
   const PORT = 3000;
@@ -356,6 +370,14 @@ async function startServer() {
 
     const cleanText = text.trim();
 
+    // Adult Content Safety Moderation
+    if (containsAdultContent(cleanText)) {
+      res.status(400).json({
+        error: "Adult or sexually explicit content is strictly prohibited on Voicewala AI. (अश्लील/वयस्क कंटेंट जनरेट करना सख्त मना है)"
+      });
+      return;
+    }
+
     // For large texts (>500 chars) or when fastMode is requested, use instant parallel synthesis engine
     if (isFastMode || cleanText.length > 500) {
       try {
@@ -371,10 +393,10 @@ async function startServer() {
     }
 
     try {
-      // Primary: Try Gemini 3.1 TTS with a tight 3.5s race timeout
+      // Primary: Try Gemini 2.5 TTS with a 10s race timeout
       const geminiPromise = generateFullAudio(cleanText, String(voice || "Kore"));
       const timeoutPromise = new Promise<never>((_, reject) => 
-        setTimeout(() => reject(new Error("Gemini TTS response timeout (>3.5s)")), 3500)
+        setTimeout(() => reject(new Error("Gemini TTS response timeout (>10s)")), 10000)
       );
 
       const wavBuffer = await Promise.race([geminiPromise, timeoutPromise]);
@@ -400,12 +422,18 @@ async function startServer() {
   app.get("/api/generate-tts", ttsHandler);
   app.post("/api/generate-tts", ttsHandler);
 
-  // Secure Server-side Smart Rewrite endpoint using gemini-3.5-flash
+  // Secure Server-side Smart Rewrite endpoint using gemini-2.5-flash
   app.post("/api/rewrite", async (req, res) => {
     const { text, mood, lang } = req.body;
 
     if (!text) {
       return res.status(400).send("Text is required");
+    }
+
+    if (containsAdultContent(String(text))) {
+      return res.status(400).json({
+        error: "Adult or sexually explicit content is strictly prohibited. (अश्लील/वयस्क कंटेंट अलाउड नहीं है)"
+      });
     }
 
     try {
@@ -434,7 +462,7 @@ Text: "${text}"`;
       }
 
       const response = await getGeminiClient().models.generateContent({
-        model: "gemini-3.5-flash",
+        model: "gemini-2.5-flash",
         contents: prompt,
       });
 
@@ -442,6 +470,44 @@ Text: "${text}"`;
     } catch (error: any) {
       console.error("AI Rewriting error:", error);
       res.status(500).send(error.message || "Error with AI rewrite");
+    }
+  });
+
+  // Secure AI Script Generator endpoint using gemini-2.5-flash
+  app.post("/api/generate-script", async (req, res) => {
+    const { topic, category, lang } = req.body;
+
+    if (!topic) {
+      return res.status(400).send("Topic is required");
+    }
+
+    if (containsAdultContent(String(topic)) || containsAdultContent(String(category || ""))) {
+      return res.status(400).json({
+        error: "Adult or sexually explicit topics are strictly prohibited. (अश्लील/वयस्क कंटेंट टॉपिक अलाउड नहीं है)"
+      });
+    }
+
+    try {
+      const prompt = `You are an expert YouTube Content Creator and Voiceover Scriptwriter in ${lang || "Hindi"}.
+Write an engaging, high-retention voiceover script for the topic: "${topic}" in category: "${category || "YouTube Shorts / Reels"}".
+
+INSTRUCTIONS:
+1. Write in clear, conversational, high-quality ${lang || "Hindi"}.
+2. Keep the opening hook extremely engaging in the first 3 seconds.
+3. Use natural pauses with [pause] tags where appropriate for voiceover pacing.
+4. Use expression tags like [excited], [dramatic], [whisper], or [slow] where needed to make the audio script sound ultra-realistic.
+5. Do NOT include scene directions like (Cut to camera), (Visual: ...), or intro/outro meta text.
+6. Output ONLY the raw spoken voiceover text ready for text-to-speech synthesis.`;
+
+      const response = await getGeminiClient().models.generateContent({
+        model: "gemini-2.5-flash",
+        contents: prompt,
+      });
+
+      res.json({ script: response.text?.trim() || "" });
+    } catch (error: any) {
+      console.error("AI Script Generator error:", error);
+      res.status(500).send(error.message || "Error generating script");
     }
   });
 

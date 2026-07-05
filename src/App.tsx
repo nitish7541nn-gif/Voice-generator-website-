@@ -7,10 +7,17 @@ import React, { useState, useEffect, useRef } from 'react';
 import { 
   Mic2, Play, Square, Download, Trash2, Wand2, 
   Settings, Languages, Volume2, FastForward, Activity,
-  Music, Github, Share2, Info, Loader2, SlidersHorizontal, ChevronDown, ChevronUp
+  Music, Github, Share2, Info, Loader2, SlidersHorizontal, ChevronDown, ChevronUp,
+  Wallet, Heart, QrCode, Sparkles, Users, History, Clock, FileText, VolumeX, X
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { rewriteText } from './lib/gemini.ts';
+import { checkExplicitContent } from './lib/moderation.ts';
+import UpiPaymentModal from './components/UpiPaymentModal.tsx';
+import AiScriptGeneratorModal from './components/AiScriptGeneratorModal.tsx';
+import DialogueBuilderModal from './components/DialogueBuilderModal.tsx';
+import VoiceHistoryModal, { SavedAudioItem } from './components/VoiceHistoryModal.tsx';
+import { containsAdultContent } from './utils/moderation.ts';
 
 // --- Types ---
 interface VoiceSettings {
@@ -58,8 +65,22 @@ export default function App() {
   const [isSynthesizing, setIsSynthesizing] = useState(false);
   const [isRewriting, setIsRewriting] = useState(false);
   const [showAdvancedSettings, setShowAdvancedSettings] = useState(false);
+  const [showUpiModal, setShowUpiModal] = useState(false);
+  const [showScriptModal, setShowScriptModal] = useState(false);
+  const [showDialogueModal, setShowDialogueModal] = useState(false);
+  const [showHistoryModal, setShowHistoryModal] = useState(false);
+  const [bgmStyle, setBgmStyle] = useState<'none' | 'cinematic' | 'lofi' | 'horror' | 'news'>('none');
   const [status, setStatus] = useState<{ msg: string; type: 'info' | 'success' | 'error' } | null>(null);
   const [audioUrl, setAudioUrl] = useState<string | null>(null);
+
+  const [history, setHistory] = useState<SavedAudioItem[]>(() => {
+    try {
+      const saved = localStorage.getItem('voicewala_history');
+      return saved ? JSON.parse(saved) : [];
+    } catch (e) {
+      return [];
+    }
+  });
 
   const [settings, setSettings] = useState<VoiceSettings>({
     lang: 'hi-IN',
@@ -72,6 +93,7 @@ export default function App() {
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const audioCtxRef = useRef<AudioContext | null>(null);
   const sourceNodeRef = useRef<AudioBufferSourceNode | null>(null);
+  const bgmOscsRef = useRef<{ stop: () => void } | null>(null);
 
   useEffect(() => {
     return () => {
@@ -84,8 +106,168 @@ export default function App() {
     setTimeout(() => setStatus(null), 4000);
   };
 
+  const saveToHistory = (savedText: string, voiceName: string) => {
+    try {
+      const newItem: SavedAudioItem = {
+        id: Date.now().toString(),
+        text: savedText,
+        voice: voiceName,
+        timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+        wordCount: savedText.trim().split(/\s+/).length,
+      };
+      const updated = [newItem, ...history.filter(h => h.text !== savedText).slice(0, 19)];
+      setHistory(updated);
+      localStorage.setItem('voicewala_history', JSON.stringify(updated));
+    } catch (e) {
+      console.warn("Could not save to history:", e);
+    }
+  };
+
+  const insertTag = (tag: string) => {
+    const textarea = document.getElementById('main-textarea') as HTMLTextAreaElement;
+    if (textarea) {
+      const start = textarea.selectionStart;
+      const end = textarea.selectionEnd;
+      const selected = text.substring(start, end);
+
+      let replacement = '';
+      if (tag === '[pause]') replacement = ' [pause] ';
+      else if (tag === '[pause: 2s]') replacement = ' [pause: 2s] ';
+      else if (tag === '[whisper]') replacement = selected ? `[whisper]${selected}[/whisper]` : ' [whisper]यहाँ फुसफुसाती बात[/whisper] ';
+      else if (tag === '[excited]') replacement = selected ? `[excited]${selected}[/excited]` : ' [excited]यहाँ जोशीली बात[/excited] ';
+      else if (tag === '[dramatic]') replacement = selected ? `[dramatic]${selected}[/dramatic]` : ' [dramatic]यहाँ ड्रामाटिक बात[/dramatic] ';
+      else if (tag === '[slow]') replacement = selected ? `[slow]${selected}[/slow]` : ' [slow]यहाँ धीमी बात[/slow] ';
+      else if (tag === '[fast]') replacement = selected ? `[fast]${selected}[/fast]` : ' [fast]यहाँ तेज़ बात[/fast] ';
+
+      const newText = text.substring(0, start) + replacement + text.substring(end);
+      setText(newText);
+      showStatus(`Added ${tag} tag!`, 'info');
+    } else {
+      setText(prev => prev + ` ${tag} `);
+    }
+  };
+
+  const playVoiceSample = async (voiceId: string) => {
+    const sampleSentences: Record<string, string> = {
+      'Kore': 'नमस्ते! मैं कोरे हूँ, आपकी ऑल-राउंडर AI वॉइस।',
+      'Puck': 'नमस्ते! मैं पक् हूँ, बिल्कुल नैचुरल पुरुष आवाज़।',
+      'Charon': 'नमस्कार! कैरोन की डीप बैरिटोन आवाज़ में आपका स्वागत है।',
+      'Fenrir': 'नमस्ते! मैं फेनरिर हूँ, पूरे जोश और उत्साह के साथ।',
+      'Aoede': 'नमस्ते! मैं आयोड हूँ, कोमल और शांत महिला स्वर।',
+      'Priya': 'नमस्कार! यह प्रिया है, आज की मुख्य खबरों के साथ।',
+      'Ananya': 'हाय दोस्तों! मैं अनन्या हूँ, चलिए कुछ मज़ेदार बनाते हैं!',
+      'Kavya': 'नमस्कार! मैं काव्या हूँ, कहानियों की मधुर आवाज़।',
+      'Sunita': 'नमस्कार, कॉर्पोरेट प्रेजेंटेशन में आपका स्वागत है।',
+      'Riya': 'हेलो दोस्तों! मैं आरजे रिया, रेडियो सिटी में आपका स्वागत है!',
+      'Shalini': 'नमस्कार बच्चों! आज हम विज्ञान के बारे में पढ़ेंगे।'
+    };
+
+    const sampleText = sampleSentences[voiceId] || 'नमस्ते! यह AI वॉइस का सैंपल टेस्ट है।';
+    showStatus(`🔊 Playing voice sample for ${voiceId}...`, 'info');
+
+    try {
+      const res = await fetch('/api/tts', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          text: sampleText,
+          lang: settings.lang,
+          voice: voiceId,
+          fastMode: true
+        })
+      });
+      if (res.ok) {
+        const blob = await res.blob();
+        const url = URL.createObjectURL(blob);
+        const audio = new Audio(url);
+        audio.play();
+      }
+    } catch (e) {
+      if ('speechSynthesis' in window) {
+        window.speechSynthesis.cancel();
+        const u = new SpeechSynthesisUtterance(sampleText);
+        u.lang = settings.lang;
+        window.speechSynthesis.speak(u);
+      }
+    }
+  };
+
+  const startBgMusic = (ctx: AudioContext, style: string, destinationGain: GainNode) => {
+    if (style === 'none') return null;
+
+    try {
+      const bgGain = ctx.createGain();
+      bgGain.gain.value = 0.05; // Subtle background level
+
+      let freqs = [220, 277.18, 329.63]; // Cinematic A Major
+      if (style === 'horror') freqs = [110, 116.54, 130.81]; // Dark horror sawtooth
+      if (style === 'news') freqs = [261.63, 329.63, 392.00]; // Bright news synth
+      if (style === 'lofi') freqs = [174.61, 220.00, 261.63]; // Chill lofi
+
+      const oscs = freqs.map(f => {
+        const osc = ctx.createOscillator();
+        osc.type = style === 'horror' ? 'sawtooth' : style === 'news' ? 'square' : 'sine';
+        osc.frequency.value = f;
+
+        const filter = ctx.createBiquadFilter();
+        filter.type = 'lowpass';
+        filter.frequency.value = style === 'news' ? 800 : 400;
+
+        osc.connect(filter);
+        filter.connect(bgGain);
+        osc.start(0);
+        return osc;
+      });
+
+      bgGain.connect(destinationGain);
+
+      return {
+        stop: () => {
+          oscs.forEach(o => {
+            try { o.stop(); } catch(e) {}
+          });
+        }
+      };
+    } catch (e) {
+      return null;
+    }
+  };
+
+  const handleShareApp = async () => {
+    const shareData = {
+      title: 'VOICEWALA - AI Text to Speech',
+      text: '🎙️ Voicewala AI - Convert any text to natural voiceover instantly! Free & Fast AI TTS.',
+      url: window.location.href,
+    };
+
+    if (navigator.share) {
+      try {
+        await navigator.share(shareData);
+        showStatus('App link shared successfully! (शेयर कर दिया गया)', 'success');
+      } catch (e) {
+        // User cancelled or share failed, fallback to copy
+        copyAppUrl();
+      }
+    } else {
+      copyAppUrl();
+    }
+  };
+
+  const copyAppUrl = async () => {
+    try {
+      await navigator.clipboard.writeText(window.location.href);
+      showStatus('📋 App Link copied! Share on WhatsApp, Telegram or SMS.', 'success');
+    } catch (e) {
+      showStatus(`📲 Share App Link: ${window.location.href}`, 'info');
+    }
+  };
+
   const speak = async () => {
     if (!text.trim()) return showStatus('Please enter some text!', 'error');
+
+    if (containsAdultContent(text)) {
+      return showStatus('🔞 Adult & sexually explicit content is strictly prohibited. (अश्लील/वयस्क कंटेंट जनरेट करना सख्त मना है)', 'error');
+    }
 
     stop();
 
@@ -213,6 +395,7 @@ export default function App() {
 
           source.start(0);
           setIsSpeaking(true);
+          saveToHistory(text, settings.voice);
           showStatus('AI Voice started speaking!', 'success');
           return;
         } catch (audioErr) {
@@ -317,6 +500,9 @@ export default function App() {
 
   const handleRewrite = async () => {
     if (!text.trim()) return;
+    if (containsAdultContent(text)) {
+      return showStatus('🔞 Adult or sexually explicit content is strictly prohibited. (अश्लील/वयस्क कंटेंट अलाउड नहीं है)', 'error');
+    }
     setIsRewriting(true);
     try {
       const rewritten = await rewriteText(text, 'natural', settings.lang);
@@ -544,6 +730,9 @@ export default function App() {
 
   const generateDownload = async () => {
     if (!text.trim()) return showStatus('Write text first!', 'error');
+    if (containsAdultContent(text)) {
+      return showStatus('🔞 Adult or sexually explicit content is strictly prohibited. (अश्लील/वयस्क कंटेंट अलाउड नहीं है)', 'error');
+    }
     setIsSynthesizing(true);
     
     const wordCount = text.trim().split(/\s+/).length;
@@ -582,6 +771,7 @@ export default function App() {
               a.download = `voicewala_${settings.voice}_${Date.now()}.${ext}`;
               a.click();
               
+              saveToHistory(text, settings.voice);
               showStatus('Audio download started!', 'success');
               setIsSynthesizing(false);
               return;
@@ -611,7 +801,61 @@ export default function App() {
 
       <main className="container max-w-3xl mx-auto px-4 py-8 md:py-12">
         {/* Header */}
-        <header id="app-header" className="flex flex-col items-center mb-8 text-center">
+        <header id="app-header" className="flex flex-col items-center mb-8 text-center relative">
+          <div className="flex flex-wrap items-center justify-center gap-2 mb-4">
+            {/* Top Single Prominent Recharge Button */}
+            <motion.button
+              whileHover={{ scale: 1.05 }}
+              whileTap={{ scale: 0.95 }}
+              onClick={() => setShowUpiModal(true)}
+              className="px-4 py-2 bg-gradient-to-r from-emerald-600 via-indigo-600 to-purple-600 text-white rounded-2xl text-xs font-black flex items-center gap-2 shadow-lg shadow-indigo-500/25 cursor-pointer transition-all border border-white/30"
+            >
+              <Wallet className="w-4 h-4 text-amber-300 animate-bounce" />
+              <span>💳 Recharge / Pack Activate</span>
+              <span className="bg-amber-400 text-slate-950 text-[10px] px-2 py-0.5 rounded-md font-black">₹10 - ₹99</span>
+            </motion.button>
+
+            {/* Smart Tools Header Quick Buttons */}
+            <motion.button
+              whileHover={{ scale: 1.05 }}
+              whileTap={{ scale: 0.95 }}
+              onClick={() => setShowHistoryModal(true)}
+              className="px-3.5 py-2 bg-white hover:bg-slate-50 text-slate-800 rounded-2xl text-xs font-extrabold flex items-center gap-1.5 border-2 border-slate-200 shadow-sm cursor-pointer transition-all"
+            >
+              <History className="w-4 h-4 text-indigo-600" />
+              <span>📜 History ({history.length})</span>
+            </motion.button>
+
+            {/* Share App Quick Button */}
+            <motion.button
+              whileHover={{ scale: 1.05 }}
+              whileTap={{ scale: 0.95 }}
+              onClick={handleShareApp}
+              className="px-3.5 py-2 bg-indigo-50 hover:bg-indigo-100 text-indigo-800 rounded-2xl text-xs font-black flex items-center gap-1.5 border-2 border-indigo-200 shadow-sm cursor-pointer transition-all"
+            >
+              <Share2 className="w-4 h-4 text-indigo-600" />
+              <span>📲 शेयर ऐप (Share App)</span>
+            </motion.button>
+
+            {/* Exit / Reset App Quick Button */}
+            <motion.button
+              whileHover={{ scale: 1.05 }}
+              whileTap={{ scale: 0.95 }}
+              onClick={() => {
+                setText('');
+                setShowScriptModal(false);
+                setShowDialogueModal(false);
+                setShowHistoryModal(false);
+                setShowUpiModal(false);
+                showStatus('एप्लीकेशन रीसेट हो गई! (App Reset)', 'info');
+              }}
+              className="px-3.5 py-2 bg-rose-50 hover:bg-rose-100 text-rose-700 rounded-2xl text-xs font-black flex items-center gap-1.5 border-2 border-rose-200 shadow-sm cursor-pointer transition-all"
+            >
+              <X className="w-4 h-4 text-rose-600" />
+              <span>⬅️ बाहर निकलें (Exit / Reset)</span>
+            </motion.button>
+          </div>
+
           <motion.div 
             id="logo-icon"
             initial={{ scale: 0.9, opacity: 0 }}
@@ -634,33 +878,19 @@ export default function App() {
         {/* Clean Single-Column Core Container */}
         <div className="space-y-5">
           {/* Main Text Area Card */}
-          <section id="editor-section" className="bg-white rounded-2xl p-5 md:p-6 border-2 border-slate-200 shadow-md relative">
-            <div className="flex items-center justify-between gap-2 mb-3">
+          <section id="editor-section" className="bg-white rounded-2xl p-5 md:p-6 border-2 border-slate-200 shadow-md relative space-y-3">
+            <div className="flex items-center justify-between border-b border-slate-100 pb-2">
               <span className="text-xs font-bold text-slate-700 flex items-center gap-2 uppercase tracking-wide">
-                <Activity className="w-4 h-4 text-indigo-600" /> Text Editor
+                <Activity className="w-4 h-4 text-indigo-600" /> Enter Text / यहाँ टेक्स्ट लिखें
               </span>
-              <div className="flex items-center gap-2">
-                <motion.button
-                  id="rewrite-btn"
-                  whileHover={{ scale: 1.03 }}
-                  whileTap={{ scale: 0.97 }}
-                  onClick={handleRewrite}
-                  disabled={isRewriting || !text}
-                  className="flex items-center gap-1.5 px-3 py-1.5 bg-indigo-50 hover:bg-indigo-100 text-indigo-700 rounded-lg text-xs font-bold transition-all border border-indigo-200 disabled:opacity-40"
-                >
-                  {isRewriting ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Wand2 className="w-3.5 h-3.5" />}
-                  Smart Rewrite
-                </motion.button>
-
-                <button 
-                  id="clear-text-btn" 
-                  onClick={() => setText('')} 
-                  title="Clear text"
-                  className="p-1.5 hover:bg-red-50 rounded-lg text-slate-500 hover:text-red-600 transition-colors"
-                >
-                  <Trash2 className="w-4 h-4" />
-                </button>
-              </div>
+              <button 
+                id="clear-text-btn" 
+                onClick={() => setText('')} 
+                title="Clear text"
+                className="p-1.5 hover:bg-red-50 rounded-lg text-slate-500 hover:text-red-600 transition-colors flex items-center gap-1 text-xs font-bold"
+              >
+                <Trash2 className="w-4 h-4" /> Clear
+              </button>
             </div>
 
             <textarea
@@ -695,7 +925,14 @@ export default function App() {
             <div>
               <label className="text-xs font-bold text-slate-700 mb-1.5 block flex items-center justify-between">
                 <span className="flex items-center gap-1.5"><Mic2 className="w-4 h-4 text-indigo-600" /> Select Voice</span>
-                <span className="text-[10px] font-bold text-indigo-700 uppercase bg-indigo-100 px-2 py-0.5 rounded border border-indigo-200">AI Voice</span>
+                <button
+                  type="button"
+                  onClick={() => playVoiceSample(settings.voice)}
+                  className="text-[10px] font-bold text-indigo-700 uppercase bg-indigo-100 hover:bg-indigo-200 px-2 py-0.5 rounded border border-indigo-200 flex items-center gap-1 cursor-pointer transition-colors"
+                >
+                  <Volume2 className="w-3 h-3" />
+                  <span>🔊 Preview Sample</span>
+                </button>
               </label>
               <select 
                 value={settings.voice}
@@ -716,14 +953,14 @@ export default function App() {
             </div>
           </div>
 
-          {/* Collapsible Speed & Audio Sliders */}
+          {/* Collapsible Speed, Audio Sliders & BGM Mixer */}
           <div className="bg-white rounded-2xl border-2 border-slate-200 shadow-md overflow-hidden">
             <button
               onClick={() => setShowAdvancedSettings(!showAdvancedSettings)}
               className="w-full px-4 py-3 bg-slate-100 hover:bg-slate-200 transition-colors flex items-center justify-between text-xs font-bold uppercase tracking-wider text-slate-800"
             >
               <span className="flex items-center gap-2">
-                <SlidersHorizontal className="w-4 h-4 text-indigo-600" /> Audio Speed & Pitch Controls
+                <SlidersHorizontal className="w-4 h-4 text-indigo-600" /> Audio Speed, Pitch & BGM Mixer
               </span>
               {showAdvancedSettings ? <ChevronUp className="w-4 h-4 text-slate-700" /> : <ChevronDown className="w-4 h-4 text-slate-700" />}
             </button>
@@ -734,7 +971,7 @@ export default function App() {
                   initial={{ height: 0, opacity: 0 }}
                   animate={{ height: 'auto', opacity: 1 }}
                   exit={{ height: 0, opacity: 0 }}
-                  className="p-5 border-t border-slate-200 bg-slate-50"
+                  className="p-5 border-t border-slate-200 bg-slate-50 space-y-4"
                 >
                   <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
                     <div className="space-y-1.5">
@@ -772,6 +1009,24 @@ export default function App() {
                         className="w-full h-2 bg-slate-200 rounded-lg appearance-none cursor-pointer accent-indigo-600"
                       />
                     </div>
+                  </div>
+
+                  {/* Background Music (BGM) Track Selector */}
+                  <div className="pt-3 border-t border-slate-200">
+                    <label className="text-xs font-extrabold text-slate-800 mb-1.5 block flex items-center gap-1.5">
+                      <Music className="w-4 h-4 text-purple-600" /> 🎵 Background Music (BGM Track)
+                    </label>
+                    <select
+                      value={bgmStyle}
+                      onChange={(e: any) => setBgmStyle(e.target.value)}
+                      className="w-full bg-white border-2 border-slate-300 rounded-xl p-2.5 text-xs font-bold text-slate-900 focus:outline-none focus:border-indigo-600 cursor-pointer"
+                    >
+                      <option value="none">🔇 No BGM (केवल वाइस)</option>
+                      <option value="cinematic">🎬 Inspiring Cinematic BGM (शांत सिनेमाटिक)</option>
+                      <option value="lofi">☕ Chill Lofi Lounge BGM (लो-फाई रिलैक्स)</option>
+                      <option value="horror">👻 Dark Horror & Suspense BGM (हॉरर सस्पेंस)</option>
+                      <option value="news">📰 News Studio BGM (न्यूज़ स्टूडियो टोन)</option>
+                    </select>
                   </div>
                 </motion.div>
               )}
@@ -839,6 +1094,7 @@ export default function App() {
               </motion.div>
             )}
           </AnimatePresence>
+
         </div>
 
         {/* Clean Minimal Footer */}
@@ -847,10 +1103,65 @@ export default function App() {
             <Mic2 className="w-4 h-4 text-indigo-600" />
             <span className="font-bold text-slate-700">Voicewala AI Studio</span>
           </div>
-          <div className="font-mono text-[10px] font-bold text-slate-500">
-            &copy; {new Date().getFullYear()} VOICEWALA SYSTEM
+          <div className="flex items-center gap-4">
+            <button 
+              onClick={() => setShowUpiModal(true)}
+              className="font-bold text-indigo-600 hover:underline flex items-center gap-1 cursor-pointer"
+            >
+              <Heart className="w-3.5 h-3.5 text-rose-500 fill-current" /> Support / UPI Pay
+            </button>
+            <div className="font-mono text-[10px] font-bold text-slate-500">
+              &copy; {new Date().getFullYear()} VOICEWALA SYSTEM
+            </div>
           </div>
         </footer>
+
+        {/* Direct UPI Payment Modal */}
+        <UpiPaymentModal
+          isOpen={showUpiModal}
+          onClose={() => setShowUpiModal(false)}
+          onSuccessStatus={(msg) => showStatus(msg, 'success')}
+        />
+
+        {/* 1-Click AI Script Generator Modal */}
+        <AiScriptGeneratorModal
+          isOpen={showScriptModal}
+          onClose={() => setShowScriptModal(false)}
+          language={settings.lang}
+          onScriptGenerated={(genScript) => {
+            setText(genScript);
+            showStatus('✨ AI Script generated & loaded into editor!', 'success');
+          }}
+        />
+
+        {/* Multi-Voice Dialogue Creator Modal */}
+        <DialogueBuilderModal
+          isOpen={showDialogueModal}
+          onClose={() => setShowDialogueModal(false)}
+          voices={AI_VOICES}
+          onSendToEditor={(stitchedText) => {
+            setText(stitchedText);
+            showStatus('🎭 Multi-character dialogue loaded into editor!', 'success');
+          }}
+        />
+
+        {/* Saved Audio & Script History Modal */}
+        <VoiceHistoryModal
+          isOpen={showHistoryModal}
+          onClose={() => setShowHistoryModal(false)}
+          history={history}
+          onClearHistory={() => {
+            setHistory([]);
+            localStorage.removeItem('voicewala_history');
+            showStatus('History cleared!', 'info');
+          }}
+          onLoadText={(historicalText, voiceName) => {
+            setText(historicalText);
+            const foundVoice = AI_VOICES.find(v => v.label.includes(voiceName) || v.id === voiceName);
+            if (foundVoice) setSettings(prev => ({ ...prev, voice: foundVoice.id }));
+            showStatus('Loaded saved text into editor!', 'success');
+          }}
+        />
       </main>
     </div>
   );
