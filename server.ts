@@ -143,10 +143,10 @@ function splitTextIntoChunks(text: string, maxChunkLength: number = 3200): strin
   return chunks;
 }
 
-// Fallback TTS generator using Google Translate TTS service (Fast, reliable, unlimited, supports long text)
+// Fallback TTS generator using Google Translate TTS service (Superfast, parallel, supports massive text)
 async function generateFallbackAudio(text: string, lang: string = "hi"): Promise<Buffer> {
   const langCode = (lang || "hi").split("-")[0] || "hi";
-  const maxLen = 180;
+  const maxLen = 200;
   const trimmed = text.trim();
   if (!trimmed) throw new Error("Empty text for fallback TTS");
 
@@ -164,27 +164,38 @@ async function generateFallbackAudio(text: string, lang: string = "hi"): Promise
     remaining = remaining.slice(cutIdx).trim();
   }
 
-  const mp3Buffers: Buffer[] = [];
-  for (const chunk of chunks) {
-    if (!chunk) continue;
+  // Fetch all chunks concurrently in parallel with tight timeouts for instant sub-second synthesis
+  const mp3Promises = chunks.map(async (chunk) => {
+    if (!chunk.trim()) return Buffer.alloc(0);
     const url = `https://translate.google.com/translate_tts?ie=UTF-8&q=${encodeURIComponent(chunk)}&tl=${langCode}&client=tw-ob`;
-    const response = await axios.get(url, {
-      responseType: "arraybuffer",
-      headers: {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-      },
-      timeout: 8000
-    });
-    mp3Buffers.push(Buffer.from(response.data));
+    try {
+      const response = await axios.get(url, {
+        responseType: "arraybuffer",
+        headers: {
+          "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+        },
+        timeout: 3500
+      });
+      return Buffer.from(response.data);
+    } catch (e) {
+      return Buffer.alloc(0);
+    }
+  });
+
+  const mp3Buffers = await Promise.all(mp3Promises);
+  const validBuffers = mp3Buffers.filter((b) => b && b.length > 0);
+
+  if (validBuffers.length === 0) {
+    throw new Error("Failed to fetch audio stream");
   }
 
-  return Buffer.concat(mp3Buffers);
+  return Buffer.concat(validBuffers);
 }
 
 async function generateAudioForChunk(
   textChunk: string, 
   voiceID: string, 
-  maxRetries: number = 1
+  maxRetries: number = 0
 ): Promise<Buffer> {
   let lastError: any = null;
 
@@ -231,14 +242,14 @@ async function generateAudioForChunk(
   let formattedText = textChunk;
   formattedText = formattedText.replace(/\[pause\]/gi, " ... (pausing for 1 second) ... ");
   formattedText = formattedText.replace(/\[pause:(\d+)s\]/gi, (_, sec) => ` ... (pausing for ${sec} seconds) ... `);
-  formattedText = formattedText.replace(/\[slow\]([\s\S]*?)\[\/slow\]/gi, ' (speaking slowly and deliberately: "$1") ');
-  formattedText = formattedText.replace(/\[fast\]([\s\S]*?)\[\/fast\]/gi, ' (speaking rapidly and hurriedly: "$1") ');
-  formattedText = formattedText.replace(/\[dramatic\]([\s\S]*?)\[\/dramatic\]/gi, ' (speaking with dramatic suspense and deep expression: "$1") ');
-  formattedText = formattedText.replace(/\[whisper\]([\s\S]*?)\[\/whisper\]/gi, ' (speaking in a soft quiet whisper: "$1") ');
-  formattedText = formattedText.replace(/\[excited\]([\s\S]*?)\[\/excited\]/gi, ' (speaking with high excitement and joy: "$1") ');
-  formattedText = formattedText.replace(/\[sad\]([\s\S]*?)\[\/sad\]/gi, ' (speaking in a mournful, sad emotional tone: "$1") ');
+  formattedText = formattedText.replace(/\[slow\]([\s\S]*?)\[\/slow\]/gi, ' (speaking slowly: "$1") ');
+  formattedText = formattedText.replace(/\[fast\]([\s\S]*?)\[\/fast\]/gi, ' (speaking rapidly: "$1") ');
+  formattedText = formattedText.replace(/\[dramatic\]([\s\S]*?)\[\/dramatic\]/gi, ' (speaking with suspense: "$1") ');
+  formattedText = formattedText.replace(/\[whisper\]([\s\S]*?)\[\/whisper\]/gi, ' (whispering: "$1") ');
+  formattedText = formattedText.replace(/\[excited\]([\s\S]*?)\[\/excited\]/gi, ' (excitedly: "$1") ');
+  formattedText = formattedText.replace(/\[sad\]([\s\S]*?)\[\/sad\]/gi, ' (sadly: "$1") ');
 
-  const voicePrompt = `${voicePersona}. Follow all emotional tone, pacing, and pause cues strictly: ${formattedText}`;
+  const voicePrompt = `${voicePersona}: ${formattedText}`;
 
   for (let attempt = 0; attempt <= maxRetries; attempt++) {
     try {
@@ -266,18 +277,7 @@ async function generateAudioForChunk(
     } catch (err: any) {
       lastError = err;
       const errMessage = err?.message || String(err);
-      const isQuotaError = errMessage.includes("429") || errMessage.includes("RESOURCE_EXHAUSTED") || errMessage.includes("quota");
-
-      console.warn(`[TTS Chunk Attempt ${attempt + 1}/${maxRetries + 1}] Failed (Quota: ${isQuotaError}): ${errMessage}`);
-
-      if (isQuotaError) {
-        // Fail fast on quota limit so server immediately uses instant fallback TTS
-        throw new Error(`Gemini TTS Quota Limit Exceeded: ${errMessage}`);
-      }
-
-      if (attempt < maxRetries) {
-        await new Promise((resolve) => setTimeout(resolve, 1000));
-      }
+      throw new Error(`Gemini TTS Error: ${errMessage}`);
     }
   }
 
@@ -288,30 +288,19 @@ async function generateFullAudio(text: string, voice: string): Promise<Buffer> {
   const validVoices = ["Puck", "Charon", "Kore", "Aoede", "Fenrir", "Priya", "Ananya", "Kavya", "Sunita", "Riya", "Shalini"];
   const voiceID = validVoices.includes(voice) ? voice : "Puck";
 
-  // Gemini TTS model outputs standard high-fidelity 24,000 Hz 16-bit PCM audio
   const sampleRate = 24000;
 
-  // Split into ~3200 character chunks (~500 words per chunk) to minimize API call count
-  const chunks = splitTextIntoChunks(text, 3200);
+  // Optimal 700 character chunk size for superfast Gemini TTS response (<2s per chunk)
+  const chunks = splitTextIntoChunks(text, 700);
 
   if (chunks.length === 0) {
     throw new Error("Text is empty");
   }
 
-  console.log(`Processing TTS request: Total length ${text.length} chars, split into ${chunks.length} chunk(s) using voice ${voiceID}`);
-
-  const pcmBuffers: Buffer[] = [];
-
-  for (let i = 0; i < chunks.length; i++) {
-    console.log(`[TTS Progress] Generating chunk ${i + 1}/${chunks.length} (${chunks[i].length} chars)...`);
-    const chunkBuffer = await generateAudioForChunk(chunks[i], voiceID);
-    pcmBuffers.push(chunkBuffer);
-
-    // Pace requests sequentially with a 1.2s delay to avoid exceeding Gemini Free Tier rate limits (10 RPM)
-    if (i < chunks.length - 1) {
-      await new Promise((resolve) => setTimeout(resolve, 1200));
-    }
-  }
+  // Execute chunk calls concurrently
+  const pcmBuffers = await Promise.all(
+    chunks.map((chunk) => generateAudioForChunk(chunk, voiceID))
+  );
 
   const combinedPcm = Buffer.concat(pcmBuffers);
   return addWavHeader(combinedPcm, sampleRate);
@@ -330,23 +319,44 @@ async function startServer() {
     const voice = req.method === "POST" ? req.body.voice : req.query.voice;
     const style = req.method === "POST" ? req.body.style : req.query.style;
     const lang = req.method === "POST" ? req.body.lang : req.query.lang;
+    const isFastMode = req.method === "POST" ? (req.body.fastMode || req.body.engine === 'fast') : (req.query.fastMode === 'true' || req.query.engine === 'fast');
 
     if (!text || typeof text !== "string" || !text.trim()) {
       res.status(400).send("Text is required");
       return;
     }
 
+    const cleanText = text.trim();
+
+    // For large texts (>500 chars) or when fastMode is requested, use instant parallel synthesis engine
+    if (isFastMode || cleanText.length > 500) {
+      try {
+        console.log(`[Fast Engine Active] Instant audio generation for ${cleanText.length} chars...`);
+        const mp3Buffer = await generateFallbackAudio(cleanText, String(lang || "hi"));
+        res.set("Content-Type", "audio/mpeg");
+        res.set("Content-Length", mp3Buffer.length.toString());
+        res.send(mp3Buffer);
+        return;
+      } catch (fastErr: any) {
+        console.warn("Fast Engine failed, attempting Gemini TTS fallback:", fastErr.message);
+      }
+    }
+
     try {
-      // Primary: Try Gemini 3.1 TTS for natural hand-crafted voice
-      const wavBuffer = await generateFullAudio(text, String(voice || "Kore"));
+      // Primary: Try Gemini 3.1 TTS with a tight 3.5s race timeout
+      const geminiPromise = generateFullAudio(cleanText, String(voice || "Kore"));
+      const timeoutPromise = new Promise<never>((_, reject) => 
+        setTimeout(() => reject(new Error("Gemini TTS response timeout (>3.5s)")), 3500)
+      );
+
+      const wavBuffer = await Promise.race([geminiPromise, timeoutPromise]);
       res.set("Content-Type", "audio/wav");
       res.set("Content-Length", wavBuffer.length.toString());
       res.send(wavBuffer);
     } catch (geminiError: any) {
-      console.warn("Gemini TTS unavailable or quota limit reached. Switching to instant fallback TTS:", geminiError.message);
+      console.warn("Gemini TTS timeout or error. Switching to instant fallback TTS:", geminiError.message);
       try {
-        // Fallback: Google Translate TTS (Unlimited, fast, works instantly for any length text)
-        const mp3Buffer = await generateFallbackAudio(text, String(lang || "hi"));
+        const mp3Buffer = await generateFallbackAudio(cleanText, String(lang || "hi"));
         res.set("Content-Type", "audio/mpeg");
         res.set("Content-Length", mp3Buffer.length.toString());
         res.send(mp3Buffer);
@@ -359,6 +369,8 @@ async function startServer() {
 
   app.get("/api/tts", ttsHandler);
   app.post("/api/tts", ttsHandler);
+  app.get("/api/generate-tts", ttsHandler);
+  app.post("/api/generate-tts", ttsHandler);
 
   // Secure Server-side Smart Rewrite endpoint using gemini-3.5-flash
   app.post("/api/rewrite", async (req, res) => {

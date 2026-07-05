@@ -93,7 +93,7 @@ export default function App() {
 
     setIsSpeaking(true);
     if (wordCount > 250) {
-      showStatus(`Generating voice for ${wordCount} words... Please wait.`, 'info');
+      showStatus(`⚡ Superfast Mode: Synthesizing voice for ${wordCount} words...`, 'info');
     } else {
       showStatus('Generating natural AI voice...', 'info');
     }
@@ -105,7 +105,8 @@ export default function App() {
         body: JSON.stringify({
           text: text,
           lang: settings.lang,
-          voice: settings.voice
+          voice: settings.voice,
+          fastMode: text.length > 400
         })
       });
       
@@ -367,9 +368,9 @@ export default function App() {
     return new Blob([wav], { type: 'audio/wav' });
   };
 
-  // Client-Side TTS Audio Generator for Netlify / Static Hosting Deployments
+  // Client-Side Superfast TTS Audio Generator for Netlify / Static Hosting Deployments
   const generateClientSideAudioDownload = async () => {
-    showStatus('Netlify Mode: Generating audio file directly in browser...', 'info');
+    showStatus('⚡ Superfast Mode: Generating audio file directly in browser...', 'info');
     const cleanLang = (settings.lang || 'hi-IN').split('-')[0];
     
     // Sanitize text from bullet symbols and tags
@@ -381,8 +382,8 @@ export default function App() {
 
     if (!cleanText) throw new Error('Text is empty!');
 
-    // Split text into manageable audio chunks (~150 chars max)
-    const maxLen = 150;
+    // Split text into ~220 char chunks cut cleanly at sentence endings or spaces
+    const maxLen = 220;
     const chunks: string[] = [];
     let remaining = cleanText;
 
@@ -397,55 +398,65 @@ export default function App() {
       remaining = remaining.slice(cutIdx).trim();
     }
 
-    const audioBuffers: ArrayBuffer[] = [];
+    // Voice mapping for StreamElements fallback
+    const voiceName = cleanLang === 'hi' ? 'Aditi' :
+                      cleanLang === 'ta' ? 'Valluvar' :
+                      cleanLang === 'fr' ? 'Mathieu' :
+                      cleanLang === 'es' ? 'Conchita' :
+                      cleanLang === 'de' ? 'Hans' : 'Brian';
 
-    for (let i = 0; i < chunks.length; i++) {
-      const chunk = chunks[i];
-      if (!chunk) continue;
-      
-      if (chunks.length > 1) {
-        showStatus(`Processing chunk ${i + 1} of ${chunks.length}...`, 'info');
-      }
-
+    // Fast single chunk downloader with tight timeout
+    const fetchSingleChunk = async (chunk: string, index: number): Promise<{ index: number; buffer: ArrayBuffer | null }> => {
+      if (!chunk.trim()) return { index, buffer: null };
       const encoded = encodeURIComponent(chunk);
       const gtUrl = `https://translate.google.com/translate_tts?ie=UTF-8&q=${encoded}&tl=${cleanLang}&client=tw-ob`;
-
-      // Voice mapping for StreamElements fallback
-      const voiceName = cleanLang === 'hi' ? 'Aditi' :
-                        cleanLang === 'ta' ? 'Valluvar' :
-                        cleanLang === 'fr' ? 'Mathieu' :
-                        cleanLang === 'es' ? 'Conchita' :
-                        cleanLang === 'de' ? 'Hans' : 'Brian';
 
       const endpoints = [
         `https://api.streamelements.com/kappa/v2/speech?voice=${voiceName}&text=${encoded}`,
         `https://corsproxy.io/?${encodeURIComponent(gtUrl)}`,
-        `https://api.allorigins.win/raw?url=${encodeURIComponent(gtUrl)}`,
         gtUrl
       ];
 
-      let chunkBuffer: ArrayBuffer | null = null;
       for (const ep of endpoints) {
         try {
-          const res = await fetch(ep);
+          const controller = new AbortController();
+          const timeoutId = setTimeout(() => controller.abort(), 2000);
+          const res = await fetch(ep, { signal: controller.signal });
+          clearTimeout(timeoutId);
           if (res.ok) {
             const buf = await res.arrayBuffer();
             if (buf && buf.byteLength > 100) {
-              chunkBuffer = buf;
-              break;
+              return { index, buffer: buf };
             }
           }
         } catch (e) {
-          // continue to next endpoint
+          // continue to next endpoint fast
         }
       }
+      return { index, buffer: null };
+    };
 
-      if (chunkBuffer) {
-        audioBuffers.push(chunkBuffer);
+    // Parallel Worker Batches (12 concurrent requests for instant assembly)
+    const BATCH_SIZE = 12;
+    const audioBuffers: (ArrayBuffer | null)[] = new Array(chunks.length).fill(null);
+    let completed = 0;
+
+    for (let i = 0; i < chunks.length; i += BATCH_SIZE) {
+      const batchChunks = chunks.slice(i, i + BATCH_SIZE);
+      const batchPromises = batchChunks.map((c, idx) => fetchSingleChunk(c, i + idx));
+      const results = await Promise.all(batchPromises);
+
+      for (const res of results) {
+        audioBuffers[res.index] = res.buffer;
+        completed++;
       }
+      const pct = Math.round((completed / chunks.length) * 100);
+      showStatus(`⚡ Superfast Audio Generation: ${pct}% complete...`, 'info');
     }
 
-    if (audioBuffers.length === 0) {
+    const validBuffers = audioBuffers.filter((b): b is ArrayBuffer => b !== null && b.byteLength > 0);
+
+    if (validBuffers.length === 0) {
       throw new Error("Could not download audio stream. Please check internet connection.");
     }
 
@@ -456,7 +467,7 @@ export default function App() {
         const tempCtx = new AudioCtx();
         const decodedBuffers: AudioBuffer[] = [];
 
-        for (const buf of audioBuffers) {
+        for (const buf of validBuffers) {
           const decoded = await tempCtx.decodeAudioData(buf.slice(0));
           decodedBuffers.push(decoded);
         }
@@ -498,7 +509,7 @@ export default function App() {
     }
 
     // Combined Blob fallback
-    const combinedBlob = new Blob(audioBuffers, { type: 'audio/mp3' });
+    const combinedBlob = new Blob(validBuffers, { type: 'audio/mp3' });
     const url = URL.createObjectURL(combinedBlob);
     setAudioUrl(url);
 
@@ -515,18 +526,17 @@ export default function App() {
     setIsSynthesizing(true);
     
     const wordCount = text.trim().split(/\s+/).length;
-    if (wordCount > 250) {
-      showStatus(`Preparing audio download for ${wordCount} words...`, 'info');
-    }
+    showStatus(`⚡ Generating superfast download for ${wordCount} words...`, 'info');
 
     try {
-      const response = await fetch('/api/tts', {
+      const response = await fetch('/api/generate-tts', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           text: text,
           lang: settings.lang,
-          voice: settings.voice
+          voice: settings.voice,
+          fastMode: true
         })
       });
       
