@@ -143,10 +143,10 @@ function splitTextIntoChunks(text: string, maxChunkLength: number = 3200): strin
   return chunks;
 }
 
-// Fallback TTS generator using Google Translate TTS service (Superfast, parallel, supports massive text)
+// Multi-provider resilient TTS generator (Supports long text, multi-batching, multi-provider fallback)
 async function generateFallbackAudio(text: string, lang: string = "hi"): Promise<Buffer> {
   const langCode = (lang || "hi").split("-")[0] || "hi";
-  const maxLen = 200;
+  const maxLen = 180;
   const trimmed = text.trim();
   if (!trimmed) throw new Error("Empty text for fallback TTS");
 
@@ -164,26 +164,54 @@ async function generateFallbackAudio(text: string, lang: string = "hi"): Promise
     remaining = remaining.slice(cutIdx).trim();
   }
 
-  // Fetch all chunks concurrently in parallel with tight timeouts for instant sub-second synthesis
-  const mp3Promises = chunks.map(async (chunk) => {
-    if (!chunk.trim()) return Buffer.alloc(0);
-    const url = `https://translate.google.com/translate_tts?ie=UTF-8&q=${encodeURIComponent(chunk)}&tl=${langCode}&client=tw-ob`;
-    try {
-      const response = await axios.get(url, {
-        responseType: "arraybuffer",
-        headers: {
-          "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-        },
-        timeout: 3500
-      });
-      return Buffer.from(response.data);
-    } catch (e) {
-      return Buffer.alloc(0);
-    }
-  });
+  const voiceName = langCode === 'hi' ? 'Aditi' :
+                    langCode === 'ta' ? 'Valluvar' :
+                    langCode === 'fr' ? 'Mathieu' :
+                    langCode === 'es' ? 'Conchita' :
+                    langCode === 'de' ? 'Hans' : 'Brian';
 
-  const mp3Buffers = await Promise.all(mp3Promises);
-  const validBuffers = mp3Buffers.filter((b) => b && b.length > 0);
+  const fetchChunkWithFallback = async (chunk: string): Promise<Buffer> => {
+    if (!chunk.trim()) return Buffer.alloc(0);
+    const encoded = encodeURIComponent(chunk);
+
+    const providers = [
+      `https://api.streamelements.com/kappa/v2/speech?voice=${voiceName}&text=${encoded}`,
+      `https://translate.google.com/translate_tts?ie=UTF-8&q=${encoded}&tl=${langCode}&client=gtx`,
+      `https://translate.google.com/translate_tts?ie=UTF-8&q=${encoded}&tl=${langCode}&client=tw-ob`,
+      `https://translate.google.com/translate_tts?ie=UTF-8&q=${encoded}&tl=${langCode}&client=dict-chrome-ex`
+    ];
+
+    for (const url of providers) {
+      try {
+        const response = await axios.get(url, {
+          responseType: "arraybuffer",
+          headers: {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+          },
+          timeout: 7000
+        });
+        const buf = Buffer.from(response.data);
+        if (buf && buf.length > 100) {
+          return buf;
+        }
+      } catch (e) {
+        // Try next provider
+      }
+    }
+    return Buffer.alloc(0);
+  };
+
+  // Process in small batches of 3 to avoid saturating network or rate-limiting
+  const BATCH_SIZE = 3;
+  const mp3Buffers: Buffer[] = [];
+
+  for (let i = 0; i < chunks.length; i += BATCH_SIZE) {
+    const batch = chunks.slice(i, i + BATCH_SIZE);
+    const batchResults = await Promise.all(batch.map((c) => fetchChunkWithFallback(c)));
+    mp3Buffers.push(...batchResults);
+  }
+
+  const validBuffers = mp3Buffers.filter((b) => b && b.length > 100);
 
   if (validBuffers.length === 0) {
     throw new Error("Failed to fetch audio stream");

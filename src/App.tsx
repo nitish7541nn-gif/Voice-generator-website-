@@ -382,8 +382,8 @@ export default function App() {
 
     if (!cleanText) throw new Error('Text is empty!');
 
-    // Split text into ~220 char chunks cut cleanly at sentence endings or spaces
-    const maxLen = 220;
+    // Split text into ~180 char chunks cut cleanly at sentence endings or spaces
+    const maxLen = 180;
     const chunks: string[] = [];
     let remaining = cleanText;
 
@@ -405,22 +405,23 @@ export default function App() {
                       cleanLang === 'es' ? 'Conchita' :
                       cleanLang === 'de' ? 'Hans' : 'Brian';
 
-    // Fast single chunk downloader with tight timeout
+    // Single chunk downloader with 7s timeout for mobile 4G networks
     const fetchSingleChunk = async (chunk: string, index: number): Promise<{ index: number; buffer: ArrayBuffer | null }> => {
       if (!chunk.trim()) return { index, buffer: null };
       const encoded = encodeURIComponent(chunk);
-      const gtUrl = `https://translate.google.com/translate_tts?ie=UTF-8&q=${encoded}&tl=${cleanLang}&client=tw-ob`;
+      const rawGtUrl = `https://translate.google.com/translate_tts?ie=UTF-8&q=${encoded}&tl=${cleanLang}&client=gtx`;
 
       const endpoints = [
         `https://api.streamelements.com/kappa/v2/speech?voice=${voiceName}&text=${encoded}`,
-        `https://corsproxy.io/?${encodeURIComponent(gtUrl)}`,
-        gtUrl
+        rawGtUrl,
+        `https://api.allorigins.win/raw?url=${encodeURIComponent(rawGtUrl)}`,
+        `https://corsproxy.io/?${encodeURIComponent(rawGtUrl)}`
       ];
 
       for (const ep of endpoints) {
         try {
           const controller = new AbortController();
-          const timeoutId = setTimeout(() => controller.abort(), 2000);
+          const timeoutId = setTimeout(() => controller.abort(), 7000);
           const res = await fetch(ep, { signal: controller.signal });
           clearTimeout(timeoutId);
           if (res.ok) {
@@ -430,14 +431,14 @@ export default function App() {
             }
           }
         } catch (e) {
-          // continue to next endpoint fast
+          // continue to next endpoint
         }
       }
       return { index, buffer: null };
     };
 
-    // Parallel Worker Batches (12 concurrent requests for instant assembly)
-    const BATCH_SIZE = 12;
+    // Parallel Worker Batches (3 concurrent requests for smooth mobile execution)
+    const BATCH_SIZE = 3;
     const audioBuffers: (ArrayBuffer | null)[] = new Array(chunks.length).fill(null);
     let completed = 0;
 
@@ -451,10 +452,10 @@ export default function App() {
         completed++;
       }
       const pct = Math.round((completed / chunks.length) * 100);
-      showStatus(`⚡ Superfast Audio Generation: ${pct}% complete...`, 'info');
+      showStatus(`⚡ Generating Audio: ${pct}% complete...`, 'info');
     }
 
-    const validBuffers = audioBuffers.filter((b): b is ArrayBuffer => b !== null && b.byteLength > 0);
+    const validBuffers = audioBuffers.filter((b): b is ArrayBuffer => b !== null && b.byteLength > 100);
 
     if (validBuffers.length === 0) {
       throw new Error("Could not download audio stream. Please check internet connection.");
