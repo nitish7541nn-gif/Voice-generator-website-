@@ -313,6 +313,203 @@ export default function App() {
     }
   };
 
+  // Helper to encode AudioBuffer to a standard 16-bit PCM WAV Blob for browser download
+  const audioBufferToWav = (buffer: AudioBuffer): Blob => {
+    const numChannels = buffer.numberOfChannels;
+    const sampleRate = buffer.sampleRate;
+    const format = 1; // PCM
+    const bitDepth = 16;
+
+    let result: Float32Array;
+    if (numChannels === 2) {
+      const left = buffer.getChannelData(0);
+      const right = buffer.getChannelData(1);
+      result = new Float32Array(left.length + right.length);
+      for (let i = 0; i < left.length; i++) {
+        result[i * 2] = left[i];
+        result[i * 2 + 1] = right[i];
+      }
+    } else {
+      result = buffer.getChannelData(0);
+    }
+
+    const dataLength = result.length * 2;
+    const headerLength = 44;
+    const wav = new Uint8Array(headerLength + dataLength);
+    const view = new DataView(wav.buffer);
+
+    const writeString = (v: DataView, offset: number, str: string) => {
+      for (let i = 0; i < str.length; i++) {
+        v.setUint8(offset + i, str.charCodeAt(i));
+      }
+    };
+
+    writeString(view, 0, 'RIFF');
+    view.setUint32(4, 36 + dataLength, true);
+    writeString(view, 8, 'WAVE');
+    writeString(view, 12, 'fmt ');
+    view.setUint32(16, 16, true);
+    view.setUint16(20, format, true);
+    view.setUint16(22, numChannels, true);
+    view.setUint32(24, sampleRate, true);
+    view.setUint32(28, sampleRate * numChannels * (bitDepth / 8), true);
+    view.setUint16(32, numChannels * (bitDepth / 8), true);
+    view.setUint16(34, bitDepth, true);
+    writeString(view, 36, 'data');
+    view.setUint32(40, dataLength, true);
+
+    let offset = 44;
+    for (let i = 0; i < result.length; i++, offset += 2) {
+      const s = Math.max(-1, Math.min(1, result[i]));
+      view.setInt16(offset, s < 0 ? s * 0x8000 : s * 0x7FFF, true);
+    }
+
+    return new Blob([wav], { type: 'audio/wav' });
+  };
+
+  // Client-Side TTS Audio Generator for Netlify / Static Hosting Deployments
+  const generateClientSideAudioDownload = async () => {
+    showStatus('Netlify Mode: Generating audio file directly in browser...', 'info');
+    const cleanLang = (settings.lang || 'hi-IN').split('-')[0];
+    
+    // Sanitize text from bullet symbols and tags
+    const cleanText = text
+      .replace(/[•·*#_~`]/g, ' ')
+      .replace(/\[\/?(pause|slow|fast|dramatic|whisper|excited|sad)(:\d+s)?\]/gi, ' ')
+      .replace(/\s+/g, ' ')
+      .trim();
+
+    if (!cleanText) throw new Error('Text is empty!');
+
+    // Split text into manageable audio chunks (~150 chars max)
+    const maxLen = 150;
+    const chunks: string[] = [];
+    let remaining = cleanText;
+
+    while (remaining.length > 0) {
+      if (remaining.length <= maxLen) {
+        chunks.push(remaining);
+        break;
+      }
+      let cutIdx = remaining.lastIndexOf(' ', maxLen);
+      if (cutIdx <= 0) cutIdx = maxLen;
+      chunks.push(remaining.slice(0, cutIdx).trim());
+      remaining = remaining.slice(cutIdx).trim();
+    }
+
+    const audioBuffers: ArrayBuffer[] = [];
+
+    for (let i = 0; i < chunks.length; i++) {
+      const chunk = chunks[i];
+      if (!chunk) continue;
+      
+      if (chunks.length > 1) {
+        showStatus(`Processing chunk ${i + 1} of ${chunks.length}...`, 'info');
+      }
+
+      const encoded = encodeURIComponent(chunk);
+      const gtUrl = `https://translate.google.com/translate_tts?ie=UTF-8&q=${encoded}&tl=${cleanLang}&client=tw-ob`;
+
+      // Voice mapping for StreamElements fallback
+      const voiceName = cleanLang === 'hi' ? 'Aditi' :
+                        cleanLang === 'ta' ? 'Valluvar' :
+                        cleanLang === 'fr' ? 'Mathieu' :
+                        cleanLang === 'es' ? 'Conchita' :
+                        cleanLang === 'de' ? 'Hans' : 'Brian';
+
+      const endpoints = [
+        `https://api.streamelements.com/kappa/v2/speech?voice=${voiceName}&text=${encoded}`,
+        `https://corsproxy.io/?${encodeURIComponent(gtUrl)}`,
+        `https://api.allorigins.win/raw?url=${encodeURIComponent(gtUrl)}`,
+        gtUrl
+      ];
+
+      let chunkBuffer: ArrayBuffer | null = null;
+      for (const ep of endpoints) {
+        try {
+          const res = await fetch(ep);
+          if (res.ok) {
+            const buf = await res.arrayBuffer();
+            if (buf && buf.byteLength > 100) {
+              chunkBuffer = buf;
+              break;
+            }
+          }
+        } catch (e) {
+          // continue to next endpoint
+        }
+      }
+
+      if (chunkBuffer) {
+        audioBuffers.push(chunkBuffer);
+      }
+    }
+
+    if (audioBuffers.length === 0) {
+      throw new Error("Could not download audio stream. Please check internet connection.");
+    }
+
+    // Process array buffers with AudioContext to compile into a single downloadable WAV file
+    const AudioCtx = window.AudioContext || (window as any).webkitAudioContext;
+    if (AudioCtx) {
+      try {
+        const tempCtx = new AudioCtx();
+        const decodedBuffers: AudioBuffer[] = [];
+
+        for (const buf of audioBuffers) {
+          const decoded = await tempCtx.decodeAudioData(buf.slice(0));
+          decodedBuffers.push(decoded);
+        }
+
+        let totalDuration = 0;
+        for (const b of decodedBuffers) {
+          totalDuration += b.duration;
+        }
+
+        const sampleRate = decodedBuffers[0].sampleRate;
+        const totalSamples = Math.ceil(totalDuration * sampleRate);
+        const mergedBuffer = tempCtx.createBuffer(1, totalSamples, sampleRate);
+        const mergedChannel = mergedBuffer.getChannelData(0);
+
+        let offset = 0;
+        for (const b of decodedBuffers) {
+          const channelData = b.getChannelData(0);
+          mergedChannel.set(channelData, offset);
+          offset += channelData.length;
+        }
+
+        await tempCtx.close();
+
+        // Convert merged AudioBuffer to WAV Blob
+        const wavBlob = audioBufferToWav(mergedBuffer);
+        const url = URL.createObjectURL(wavBlob);
+        setAudioUrl(url);
+
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = `voicewala_${settings.voice}_${Date.now()}.wav`;
+        a.click();
+
+        showStatus('Audio download started successfully!', 'success');
+        return;
+      } catch (procErr) {
+        console.warn("AudioContext processing fallback:", procErr);
+      }
+    }
+
+    // Combined Blob fallback
+    const combinedBlob = new Blob(audioBuffers, { type: 'audio/mp3' });
+    const url = URL.createObjectURL(combinedBlob);
+    setAudioUrl(url);
+
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `voicewala_${settings.voice}_${Date.now()}.mp3`;
+    a.click();
+
+    showStatus('Audio download started successfully!', 'success');
+  };
+
   const generateDownload = async () => {
     if (!text.trim()) return showStatus('Write text first!', 'error');
     setIsSynthesizing(true);
@@ -333,7 +530,9 @@ export default function App() {
         })
       });
       
-      if (!response.ok) throw new Error('API Error');
+      if (!response.ok) {
+        throw new Error(`Server endpoint not reachable (${response.status})`);
+      }
 
       const contentType = response.headers.get('content-type') || '';
       const ext = contentType.includes('mpeg') || contentType.includes('mp3') ? 'mp3' : 'wav';
@@ -349,8 +548,13 @@ export default function App() {
       
       showStatus('Audio download started!', 'success');
     } catch (e) {
-      console.error(e);
-      showStatus('Download Error', 'error');
+      console.warn("Backend API not reachable (e.g. Netlify static hosting). Using Client-Side Audio Generator...", e);
+      try {
+        await generateClientSideAudioDownload();
+      } catch (fallbackErr: any) {
+        console.error(fallbackErr);
+        showStatus(`Download Error: ${fallbackErr.message || 'Failed to generate audio'}`, 'error');
+      }
     } finally {
       setIsSynthesizing(false);
     }
