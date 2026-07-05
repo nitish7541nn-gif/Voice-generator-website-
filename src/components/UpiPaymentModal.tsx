@@ -9,38 +9,25 @@ interface UpiPaymentModalProps {
   isOpen: boolean;
   onClose: () => void;
   onSuccessStatus?: (msg: string) => void;
+  onPlanActivated?: (plan: { name: string; price: number; wordLimit: number; minuteLimit: number }) => void;
 }
 
-export default function UpiPaymentModal({ isOpen, onClose, onSuccessStatus }: UpiPaymentModalProps) {
-  // Default UPI ID - owner can edit & save in localStorage (Default set to Navi UPI 7541022323@nyes)
-  const [upiId, setUpiId] = useState(() => {
-    const saved = localStorage.getItem('voicewala_upi_id');
-    if (!saved || saved === 'nitish7541nn@ybl') {
-      return '7541022323@nyes';
-    }
-    return saved;
-  });
-  
-  const [payeeName, setPayeeName] = useState(() => {
-    return localStorage.getItem('voicewala_payee_name') || 'Voicewala AI';
-  });
+export default function UpiPaymentModal({ isOpen, onClose, onSuccessStatus, onPlanActivated }: UpiPaymentModalProps) {
+  // Official Fixed App Receiver UPI ID (Navi / PhonePe / Google Pay / Paytm)
+  const cleanUpi = '7541022323@nyes';
+  const cleanName = 'Voicewala AI';
 
   const [amount, setAmount] = useState<number>(29);
   const [customAmount, setCustomAmount] = useState<string>('29');
   const [copied, setCopied] = useState(false);
-  const [showSettings, setShowSettings] = useState(false);
-  const [tempUpi, setTempUpi] = useState(upiId);
-  const [tempName, setTempName] = useState(payeeName);
   const [utrNumber, setUtrNumber] = useState('');
   const [verified, setVerified] = useState(false);
 
+  // Ensure stale custom UPI IDs in localStorage are cleaned up
   useEffect(() => {
-    localStorage.setItem('voicewala_upi_id', upiId);
-  }, [upiId]);
-
-  useEffect(() => {
-    localStorage.setItem('voicewala_payee_name', payeeName);
-  }, [payeeName]);
+    localStorage.setItem('voicewala_upi_id', cleanUpi);
+    localStorage.setItem('voicewala_payee_name', cleanName);
+  }, []);
 
   if (!isOpen) return null;
 
@@ -57,9 +44,26 @@ export default function UpiPaymentModal({ isOpen, onClose, onSuccessStatus }: Up
     }
   };
 
-  const cleanUpi = upiId.trim();
-  const cleanName = payeeName.trim() || 'Voicewala AI';
   const amountFormatted = amount.toFixed(2);
+
+  const getPackDetails = (amt: number) => {
+    if (amt <= 10) return { name: '₹10 Starter Pack', price: 10, wordLimit: 750, minuteLimit: 5, dailyGenerationsLimit: 15 };
+    if (amt <= 29) return { name: '₹29 Best Value Pack', price: 29, wordLimit: 2250, minuteLimit: 15, dailyGenerationsLimit: 30 };
+    if (amt <= 49) return { name: '₹49 Pro Pack', price: 49, wordLimit: 4500, minuteLimit: 30, dailyGenerationsLimit: 50 };
+    return { name: '₹99 Unlimited Pack', price: 99, wordLimit: 9000, minuteLimit: 60, dailyGenerationsLimit: 100 };
+  };
+
+  const activatePlanNow = (customRef?: string) => {
+    const pack = getPackDetails(amount);
+    if (onPlanActivated) {
+      onPlanActivated(pack);
+    }
+    setVerified(true);
+    const refText = customRef || utrNumber || 'UTR-VERIFIED';
+    if (onSuccessStatus) {
+      onSuccessStatus(`🎉 ${pack.name} Activated Successfully! (${pack.minuteLimit} Min / ${pack.wordLimit.toLocaleString()} Words Limit Active)`);
+    }
+  };
 
   // Standard NPCI compliant UPI URI
   const upiUri = `upi://pay?pa=${encodeURIComponent(cleanUpi)}&pn=${encodeURIComponent(cleanName)}&am=${amountFormatted}&cu=INR&tn=${encodeURIComponent('Voicewala AI Recharge')}&tr=VW${Date.now()}`;
@@ -105,23 +109,13 @@ export default function UpiPaymentModal({ isOpen, onClose, onSuccessStatus }: Up
     if (onSuccessStatus) onSuccessStatus('UPI ID copied to clipboard!');
   };
 
-  const saveSettings = () => {
-    if (tempUpi.trim()) {
-      setUpiId(tempUpi.trim());
-      setPayeeName(tempName.trim() || 'Voicewala AI');
-      setShowSettings(false);
-      if (onSuccessStatus) onSuccessStatus('Your UPI ID updated successfully!');
-    }
-  };
-
   const handleVerifyUTR = (e: React.FormEvent) => {
     e.preventDefault();
     if (!utrNumber.trim() || utrNumber.length < 6) {
       alert('Kripya 12-digit UTR / Reference ID darj karein!');
       return;
     }
-    setVerified(true);
-    if (onSuccessStatus) onSuccessStatus('Payment record submitted successfully! Thank you!');
+    activatePlanNow(utrNumber.trim());
   };
 
   return (
@@ -154,63 +148,15 @@ export default function UpiPaymentModal({ isOpen, onClose, onSuccessStatus }: Up
               </div>
               <div>
                 <h2 className="text-xl font-black flex items-center gap-2">
-                  Direct UPI Pay <span className="bg-emerald-500/30 text-emerald-200 text-xs px-2 py-0.5 rounded-full border border-emerald-400/30 font-bold">No PAN Required</span>
+                  Direct UPI Pay <span className="bg-emerald-500/30 text-emerald-200 text-xs px-2 py-0.5 rounded-full border border-emerald-400/30 font-bold">Official Voicewala Gateway</span>
                 </h2>
                 <p className="text-xs text-indigo-100 font-medium mt-0.5">Pay directly via PhonePe, Google Pay & Paytm</p>
               </div>
             </div>
-
-            <button
-              onClick={() => setShowSettings(!showSettings)}
-              className="mt-4 text-xs bg-white/10 hover:bg-white/20 border border-white/20 text-white font-bold px-3 py-1.5 rounded-lg flex items-center gap-1.5 transition-all cursor-pointer"
-            >
-              <Settings className="w-3.5 h-3.5" />
-              {showSettings ? 'Hide UPI Settings' : '⚙️ Set My UPI ID'}
-            </button>
           </div>
 
           {/* Body Content */}
           <div className="p-6 space-y-6 max-h-[80vh] overflow-y-auto">
-            {/* Owner UPI Settings Drawer */}
-            {showSettings && (
-              <motion.div 
-                initial={{ opacity: 0, height: 0 }}
-                animate={{ opacity: 1, height: 'auto' }}
-                className="bg-slate-50 border-2 border-indigo-200 rounded-2xl p-4 space-y-3"
-              >
-                <div className="text-xs font-bold text-indigo-900 flex items-center gap-1.5">
-                  <Settings className="w-4 h-4 text-indigo-600" />
-                  Apna UPI ID Set Karein (Aapke Paytm / PhonePe ka UPI ID):
-                </div>
-                <div>
-                  <label className="text-[11px] font-bold text-slate-600">Your UPI ID (e.g. 9876543210@paytm, name@ybl)</label>
-                  <input 
-                    type="text" 
-                    value={tempUpi}
-                    onChange={(e) => setTempUpi(e.target.value)}
-                    placeholder="e.g. nitish7541nn@ybl"
-                    className="w-full mt-1 px-3 py-2 bg-white border border-slate-300 rounded-xl text-sm font-bold font-mono focus:outline-none focus:border-indigo-600"
-                  />
-                </div>
-                <div>
-                  <label className="text-[11px] font-bold text-slate-600">Name on UPI (optional)</label>
-                  <input 
-                    type="text" 
-                    value={tempName}
-                    onChange={(e) => setTempName(e.target.value)}
-                    placeholder="Voicewala AI / Nitish"
-                    className="w-full mt-1 px-3 py-2 bg-white border border-slate-300 rounded-xl text-sm font-bold focus:outline-none focus:border-indigo-600"
-                  />
-                </div>
-                <button
-                  onClick={saveSettings}
-                  className="w-full py-2 bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl text-xs font-bold transition-all cursor-pointer shadow-md"
-                >
-                  Save My UPI ID
-                </button>
-              </motion.div>
-            )}
-
             {!verified ? (
               <>
                 {/* Amount Selectors */}
@@ -227,10 +173,10 @@ export default function UpiPaymentModal({ isOpen, onClose, onSuccessStatus }: Up
                   {/* Pricing Cards */}
                   <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 mb-3">
                     {[
-                      { amt: 10, time: '5 Min Audio', words: '1,500 Words', validity: '7 Days Valid', tag: 'Basic' },
-                      { amt: 29, time: '15 Min Audio', words: '5,000 Words', validity: '28 Days Valid', tag: '⭐ Best Value' },
-                      { amt: 49, time: '30 Min Audio', words: '10,000 Words', validity: '30 Days Valid', tag: 'Pro Pack' },
-                      { amt: 99, time: '60 Min Audio', words: '25,000 Words', validity: '60 Days Valid', tag: 'Unlimited' },
+                      { amt: 10, time: '5 Min Audio', words: '750 Words', gens: '15 Gens/Day', validity: '7 Days Valid', tag: 'Basic' },
+                      { amt: 29, time: '15 Min Audio', words: '2,250 Words', gens: '30 Gens/Day', validity: '28 Days Valid', tag: '⭐ Best Value' },
+                      { amt: 49, time: '30 Min Audio', words: '4,500 Words', gens: '50 Gens/Day', validity: '30 Days Valid', tag: 'Pro Pack' },
+                      { amt: 99, time: '60 Min Audio', words: '9,000 Words', gens: '100 Gens/Day', validity: '60 Days Valid', tag: 'Unlimited' },
                     ].map((pack) => (
                       <button
                         key={pack.amt}
@@ -249,7 +195,7 @@ export default function UpiPaymentModal({ isOpen, onClose, onSuccessStatus }: Up
                         </div>
                         <div className="mt-2 pt-1 border-t border-slate-200/30 text-[11px] font-bold">
                           <div>⏱️ {pack.time}</div>
-                          <div className={`text-[10px] ${amount === pack.amt ? 'text-indigo-100' : 'text-slate-500'}`}>📝 {pack.words}</div>
+                          <div className={`text-[10px] ${amount === pack.amt ? 'text-indigo-100' : 'text-slate-500'}`}>⚡ {pack.gens}</div>
                           <div className={`text-[10px] mt-0.5 font-extrabold ${amount === pack.amt ? 'text-amber-200' : 'text-amber-600'}`}>📅 {pack.validity}</div>
                         </div>
                       </button>
@@ -259,15 +205,15 @@ export default function UpiPaymentModal({ isOpen, onClose, onSuccessStatus }: Up
                   {/* Free vs Paid Limit Comparison Table */}
                   <div className="bg-gradient-to-br from-indigo-50 via-purple-50 to-amber-50 border-2 border-indigo-200/80 rounded-2xl p-3 text-xs space-y-2 mb-3">
                     <div className="font-black text-indigo-950 flex items-center justify-between">
-                      <span className="flex items-center gap-1">✨ UNLIMITED Voice Generations (जितनी मर्जी वॉइस बनाएं)</span>
-                      <span className="text-[10px] text-emerald-700 bg-emerald-100 border border-emerald-300 font-extrabold px-2 py-0.5 rounded-full">Valid for Selected Days</span>
+                      <span className="flex items-center gap-1">✨ SELECT RECHARGE PACK (प्लान और टाइम लिमिट चुनें)</span>
+                      <span className="text-[10px] text-emerald-700 bg-emerald-100 border border-emerald-300 font-extrabold px-2 py-0.5 rounded-full">Free: 1 Min / 5 Gens/Day</span>
                     </div>
 
                     <div className="text-[11px] text-slate-700 font-medium leading-relaxed bg-white/70 p-2 rounded-xl border border-indigo-100 space-y-1">
                       <div><span className="font-extrabold text-indigo-900">⚡ Smart YouTuber Protection Policy:</span></div>
                       <div className="text-[10px] text-slate-700 font-medium bg-amber-50/80 px-2 py-1.5 rounded-lg border border-amber-200 leading-normal">
-                        • <b>₹10 Starter Pack:</b> Shorts/Reels ke liye (Max 3-5 Min audio). Heavy YouTubers long videos ke liye <b>₹29 / ₹49 Pack</b> use karein.<br/>
-                        • <b>Fair Daily Limit:</b> Server safety ke liye har plan mein daily generous generations limit hai taaki koi bot server slow na kar sake.
+                        • <b>Free Plan:</b> Max 1 Min per audio, Max 5 Generations/Day.<br/>
+                        • <b>Recharge Packs:</b> High audio lengths (up to 60 min) + 15 to 100 Daily Generations for YouTubers.
                       </div>
                     </div>
 
@@ -278,28 +224,28 @@ export default function UpiPaymentModal({ isOpen, onClose, onSuccessStatus }: Up
                       <div className="font-bold text-slate-500">Validity (वैधता)</div>
 
                       <div className="font-bold text-slate-600">Free (₹0)</div>
-                      <div className="text-slate-800 font-medium">1-2 Min</div>
+                      <div className="text-slate-800 font-medium">1 Min (150 W)</div>
                       <div className="text-slate-700 font-bold">5 / Day</div>
                       <div className="text-slate-500 font-bold">Lifetime Free</div>
 
                       <div className="font-bold text-purple-700">₹10 Pack</div>
-                      <div className="text-purple-900 font-bold">Up to 3-5 Min</div>
-                      <div className="text-purple-900 font-bold">20 / Day</div>
+                      <div className="text-purple-900 font-bold">Up to 5 Min</div>
+                      <div className="text-purple-900 font-bold">15 / Day</div>
                       <div className="text-purple-900 font-extrabold">7 Days (7 दिन)</div>
 
                       <div className="font-bold text-emerald-700">₹29 Pack ⭐</div>
-                      <div className="text-emerald-900 font-black">Up to 15 Min (85MB)</div>
-                      <div className="text-emerald-900 font-black text-emerald-600">50 / Day (YouTuber)</div>
+                      <div className="text-emerald-900 font-black">Up to 15 Min</div>
+                      <div className="text-emerald-900 font-black text-emerald-600">30 / Day (YouTuber)</div>
                       <div className="text-emerald-900 font-black">28 Days (1 महिना)</div>
 
                       <div className="font-bold text-blue-700">₹49 Pack</div>
                       <div className="text-blue-900 font-bold">Up to 30 Min</div>
-                      <div className="text-blue-900 font-black text-emerald-600">100 / Day (Pro)</div>
+                      <div className="text-blue-900 font-black text-emerald-600">50 / Day (Pro)</div>
                       <div className="text-blue-900 font-bold">30 Days (1 महिना)</div>
 
                       <div className="font-bold text-amber-700">₹99 Pack</div>
                       <div className="text-amber-900 font-black">Up to 60 Min</div>
-                      <div className="text-amber-900 font-black text-emerald-600">♾️ Unlimited (VIP)</div>
+                      <div className="text-amber-900 font-black text-emerald-600">100 / Day (VIP)</div>
                       <div className="text-amber-900 font-black">60 Days (2 महीने)</div>
                     </div>
                   </div>
@@ -403,7 +349,7 @@ export default function UpiPaymentModal({ isOpen, onClose, onSuccessStatus }: Up
                   <div className="mt-3 flex items-center justify-center gap-2">
                     <span className="text-xs font-bold text-slate-500">UPI ID:</span>
                     <code className="text-xs font-mono font-bold text-slate-800 bg-slate-200 px-2.5 py-1 rounded-lg">
-                      {upiId}
+                      {cleanUpi}
                     </code>
                     <button
                       onClick={copyUpi}
@@ -455,8 +401,7 @@ export default function UpiPaymentModal({ isOpen, onClose, onSuccessStatus }: Up
                       onClick={() => {
                         const randomUtr = 'PAY-' + Math.floor(100000000000 + Math.random() * 900000000000);
                         setUtrNumber(randomUtr);
-                        setVerified(true);
-                        if (onSuccessStatus) onSuccessStatus(`Plan activated successfully! (Ref: ${randomUtr})`);
+                        activatePlanNow(randomUtr);
                       }}
                       className="w-full py-2 bg-gradient-to-r from-amber-500 to-amber-600 hover:from-amber-600 hover:to-amber-700 text-slate-950 font-black rounded-xl text-xs shadow-md cursor-pointer transition-all flex items-center justify-center gap-1.5"
                     >

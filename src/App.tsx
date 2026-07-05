@@ -59,6 +59,15 @@ const AI_VOICES = [
   { id: 'Fenrir', label: '👨 फेनरिर (Fenrir - Expressive Male)', desc: 'Strong Expressive Male Voice', gender: 'male', pitchOffset: 0.95 },
 ];
 
+export interface ActivePlan {
+  name: string;
+  price: number;
+  wordLimit: number;
+  minuteLimit: number;
+  dailyGenerationsLimit?: number;
+  activatedAt: string;
+}
+
 export default function App() {
   const [text, setText] = useState('');
   const [isSpeaking, setIsSpeaking] = useState(false);
@@ -72,6 +81,86 @@ export default function App() {
   const [bgmStyle, setBgmStyle] = useState<'none' | 'cinematic' | 'lofi' | 'horror' | 'news'>('none');
   const [status, setStatus] = useState<{ msg: string; type: 'info' | 'success' | 'error' } | null>(null);
   const [audioUrl, setAudioUrl] = useState<string | null>(null);
+
+  const [activePlan, setActivePlan] = useState<ActivePlan | null>(() => {
+    try {
+      const saved = localStorage.getItem('voicewala_active_plan');
+      return saved ? JSON.parse(saved) : null;
+    } catch (e) {
+      return null;
+    }
+  });
+
+  const getDailyGenerationCount = (): number => {
+    try {
+      const todayStr = new Date().toISOString().split('T')[0];
+      const data = JSON.parse(localStorage.getItem('voicewala_daily_generations') || '{}');
+      if (data.date === todayStr) {
+        return data.count || 0;
+      }
+    } catch (e) {
+      // ignore
+    }
+    return 0;
+  };
+
+  const [dailyCount, setDailyCount] = useState<number>(() => getDailyGenerationCount());
+
+  const incrementDailyGenerationCount = () => {
+    try {
+      const todayStr = new Date().toISOString().split('T')[0];
+      const current = getDailyGenerationCount();
+      const newCount = current + 1;
+      localStorage.setItem('voicewala_daily_generations', JSON.stringify({
+        date: todayStr,
+        count: newCount
+      }));
+      setDailyCount(newCount);
+    } catch (e) {
+      // ignore
+    }
+  };
+
+  const maxAllowedWords = activePlan ? activePlan.wordLimit : 150; // 1 Min = ~150 words
+  const maxDailyGenerations = activePlan ? (activePlan.dailyGenerationsLimit || 15) : 5; // Free = 5/day
+
+  const checkPlanLimit = (inputWordCount: number): boolean => {
+    const todayCount = getDailyGenerationCount();
+
+    // 1. Check daily count limit
+    if (todayCount >= maxDailyGenerations) {
+      if (!activePlan) {
+        showStatus(`⚠️ Free Daily Limit Reached! (${todayCount}/${maxDailyGenerations} used today). Free limit is 1 Min audio, 5 times/day. Recharge / Activate Pack for more!`, 'error');
+      } else {
+        showStatus(`⚠️ Daily Limit Reached for ${activePlan.name}! (${todayCount}/${maxDailyGenerations} used today). Upgrade pack for more daily generations.`, 'error');
+      }
+      setShowUpiModal(true);
+      return false;
+    }
+
+    // 2. Check word count / audio duration limit per voice
+    if (inputWordCount > maxAllowedWords) {
+      if (!activePlan) {
+        showStatus(`⚠️ Free Audio Limit Exceeded (${inputWordCount} Words / ~${Math.ceil(inputWordCount / 150)} Min)! Free limit is 1 Min (150 words). Recharge / Activate Pack to unlock longer audio!`, 'error');
+      } else {
+        showStatus(`⚠️ Audio length exceeds ${activePlan.name} limit (${inputWordCount} Words > ${maxAllowedWords} limit)! Please upgrade pack for longer audio.`, 'error');
+      }
+      setShowUpiModal(true);
+      return false;
+    }
+
+    return true;
+  };
+
+  const handlePlanActivated = (plan: { name: string; price: number; wordLimit: number; minuteLimit: number; dailyGenerationsLimit?: number }) => {
+    const newPlanRecord: ActivePlan = {
+      ...plan,
+      activatedAt: new Date().toLocaleDateString('hi-IN', { day: 'numeric', month: 'short', year: 'numeric' })
+    };
+    setActivePlan(newPlanRecord);
+    localStorage.setItem('voicewala_active_plan', JSON.stringify(newPlanRecord));
+    showStatus(`🎉 ${plan.name} Activated! ${plan.minuteLimit} Min / ${plan.wordLimit.toLocaleString()} Words limit unlocked.`, 'success');
+  };
 
   const [history, setHistory] = useState<SavedAudioItem[]>(() => {
     try {
@@ -269,9 +358,12 @@ export default function App() {
       return showStatus('🔞 Adult & sexually explicit content is strictly prohibited. (अश्लील/वयस्क कंटेंट जनरेट करना सख्त मना है)', 'error');
     }
 
-    stop();
-
     const wordCount = text.trim().split(/\s+/).length;
+    if (!checkPlanLimit(wordCount)) return;
+
+    incrementDailyGenerationCount();
+
+    stop();
 
     setIsSpeaking(true);
     if (wordCount > 250) {
@@ -571,6 +663,11 @@ export default function App() {
 
   // Client-Side Superfast TTS Audio Generator for Netlify / Static Hosting Deployments
   const generateClientSideAudioDownload = async () => {
+    const wordCount = text.trim().split(/\s+/).length;
+    if (!checkPlanLimit(wordCount)) return;
+
+    incrementDailyGenerationCount();
+
     showStatus('⚡ Superfast Mode: Generating audio file directly in browser...', 'info');
     const cleanLang = (settings.lang || 'hi-IN').split('-')[0];
     
@@ -733,9 +830,14 @@ export default function App() {
     if (containsAdultContent(text)) {
       return showStatus('🔞 Adult or sexually explicit content is strictly prohibited. (अश्लील/वयस्क कंटेंट अलाउड नहीं है)', 'error');
     }
+
+    const wordCount = text.trim().split(/\s+/).length;
+    if (!checkPlanLimit(wordCount)) return;
+
+    incrementDailyGenerationCount();
+
     setIsSynthesizing(true);
     
-    const wordCount = text.trim().split(/\s+/).length;
     showStatus(`⚡ Generating superfast audio for ${wordCount} words...`, 'info');
 
     const apiEndpoints = [
@@ -814,6 +916,18 @@ export default function App() {
               <span>💳 Recharge / Pack Activate</span>
               <span className="bg-amber-400 text-slate-950 text-[10px] px-2 py-0.5 rounded-md font-black">₹10 - ₹99</span>
             </motion.button>
+
+            {/* Active Plan Indicator Badge */}
+            {activePlan ? (
+              <div className="px-3 py-1.5 bg-emerald-50 border-2 border-emerald-300 text-emerald-900 rounded-2xl text-xs font-black flex items-center gap-1.5 shadow-xs">
+                <span className="w-2.5 h-2.5 rounded-full bg-emerald-500 animate-pulse" />
+                <span>⚡ Active: {activePlan.name} ({dailyCount}/{maxDailyGenerations} Today, {activePlan.minuteLimit} Min Max)</span>
+              </div>
+            ) : (
+              <div className="px-3 py-1.5 bg-amber-50 border border-amber-300 text-amber-900 rounded-2xl text-[11px] font-black flex items-center gap-1">
+                <span>🆓 Free Tier: 1 Min Limit ({dailyCount}/5 Used Today)</span>
+              </div>
+            )}
 
             {/* Smart Tools Header Quick Buttons */}
             <motion.button
@@ -1121,6 +1235,7 @@ export default function App() {
           isOpen={showUpiModal}
           onClose={() => setShowUpiModal(false)}
           onSuccessStatus={(msg) => showStatus(msg, 'success')}
+          onPlanActivated={handlePlanActivated}
         />
 
         {/* 1-Click AI Script Generator Modal */}
