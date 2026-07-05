@@ -121,34 +121,8 @@ export default function App() {
     }
   };
 
-  const maxAllowedWords = activePlan ? activePlan.wordLimit : 150; // 1 Min = ~150 words
-  const maxDailyGenerations = activePlan ? (activePlan.dailyGenerationsLimit || 15) : 5; // Free = 5/day
-
-  const checkPlanLimit = (inputWordCount: number): boolean => {
-    const todayCount = getDailyGenerationCount();
-
-    // 1. Check daily count limit
-    if (todayCount >= maxDailyGenerations) {
-      if (!activePlan) {
-        showStatus(`⚠️ Free Daily Limit Reached! (${todayCount}/${maxDailyGenerations} used today). Free limit is 1 Min audio, 5 times/day. Recharge / Activate Pack for more!`, 'error');
-      } else {
-        showStatus(`⚠️ Daily Limit Reached for ${activePlan.name}! (${todayCount}/${maxDailyGenerations} used today). Upgrade pack for more daily generations.`, 'error');
-      }
-      setShowUpiModal(true);
-      return false;
-    }
-
-    // 2. Check word count / audio duration limit per voice
-    if (inputWordCount > maxAllowedWords) {
-      if (!activePlan) {
-        showStatus(`⚠️ Free Audio Limit Exceeded (${inputWordCount} Words / ~${Math.ceil(inputWordCount / 150)} Min)! Free limit is 1 Min (150 words). Recharge / Activate Pack to unlock longer audio!`, 'error');
-      } else {
-        showStatus(`⚠️ Audio length exceeds ${activePlan.name} limit (${inputWordCount} Words > ${maxAllowedWords} limit)! Please upgrade pack for longer audio.`, 'error');
-      }
-      setShowUpiModal(true);
-      return false;
-    }
-
+  const checkPlanLimit = (_inputWordCount: number): boolean => {
+    // Unlimited & 100% free - no restrictions
     return true;
   };
 
@@ -905,29 +879,11 @@ export default function App() {
         {/* Header */}
         <header id="app-header" className="flex flex-col items-center mb-8 text-center relative">
           <div className="flex flex-wrap items-center justify-center gap-2 mb-4">
-            {/* Top Single Prominent Recharge Button */}
-            <motion.button
-              whileHover={{ scale: 1.05 }}
-              whileTap={{ scale: 0.95 }}
-              onClick={() => setShowUpiModal(true)}
-              className="px-4 py-2 bg-gradient-to-r from-emerald-600 via-indigo-600 to-purple-600 text-white rounded-2xl text-xs font-black flex items-center gap-2 shadow-lg shadow-indigo-500/25 cursor-pointer transition-all border border-white/30"
-            >
-              <Wallet className="w-4 h-4 text-amber-300 animate-bounce" />
-              <span>💳 Recharge / Pack Activate</span>
-              <span className="bg-amber-400 text-slate-950 text-[10px] px-2 py-0.5 rounded-md font-black">₹10 - ₹99</span>
-            </motion.button>
-
-            {/* Active Plan Indicator Badge */}
-            {activePlan ? (
-              <div className="px-3 py-1.5 bg-emerald-50 border-2 border-emerald-300 text-emerald-900 rounded-2xl text-xs font-black flex items-center gap-1.5 shadow-xs">
-                <span className="w-2.5 h-2.5 rounded-full bg-emerald-500 animate-pulse" />
-                <span>⚡ Active: {activePlan.name} ({dailyCount}/{maxDailyGenerations} Today, {activePlan.minuteLimit} Min Max)</span>
-              </div>
-            ) : (
-              <div className="px-3 py-1.5 bg-amber-50 border border-amber-300 text-amber-900 rounded-2xl text-[11px] font-black flex items-center gap-1">
-                <span>🆓 Free Tier: 1 Min Limit ({dailyCount}/5 Used Today)</span>
-              </div>
-            )}
+            {/* 100% Free Unlimited Badge */}
+            <div className="px-3.5 py-2 bg-emerald-50 border-2 border-emerald-300 text-emerald-900 rounded-2xl text-xs font-black flex items-center gap-1.5 shadow-sm">
+              <span className="w-2.5 h-2.5 rounded-full bg-emerald-500 animate-pulse" />
+              <span>🎉 100% Unlimited Free Access (No Payment Required)</span>
+            </div>
 
             {/* Smart Tools Header Quick Buttons */}
             <motion.button
