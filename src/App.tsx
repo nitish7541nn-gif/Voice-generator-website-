@@ -99,20 +99,35 @@ export default function App() {
     }
 
     try {
-      const response = await fetch('/api/tts', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          text: text,
-          lang: settings.lang,
-          voice: settings.voice,
-          fastMode: text.length > 400
-        })
-      });
-      
-      if (!response.ok) {
-        const errorText = await response.text();
-        throw new Error(errorText || 'API Server Error');
+      let response: Response | null = null;
+      const ttsEndpoints = ['/api/tts', '/.netlify/functions/tts'];
+
+      for (const ep of ttsEndpoints) {
+        try {
+          const res = await fetch(ep, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              text: text,
+              lang: settings.lang,
+              voice: settings.voice,
+              fastMode: text.length > 400
+            })
+          });
+          if (res.ok) {
+            const ct = res.headers.get('content-type') || '';
+            if (!ct.includes('text/html')) {
+              response = res;
+              break;
+            }
+          }
+        } catch (e) {
+          // try next
+        }
+      }
+
+      if (!response) {
+        throw new Error('Server audio endpoint not reachable');
       }
 
       const blob = await response.blob();
@@ -412,6 +427,8 @@ export default function App() {
       const rawGtUrl = `https://translate.google.com/translate_tts?ie=UTF-8&q=${encoded}&tl=${cleanLang}&client=gtx`;
 
       const endpoints = [
+        `/.netlify/functions/tts?text=${encoded}&lang=${cleanLang}`,
+        `/api/tts?text=${encoded}&lang=${cleanLang}`,
         `https://api.streamelements.com/kappa/v2/speech?voice=${voiceName}&text=${encoded}`,
         rawGtUrl,
         `https://api.allorigins.win/raw?url=${encodeURIComponent(rawGtUrl)}`,
@@ -425,9 +442,12 @@ export default function App() {
           const res = await fetch(ep, { signal: controller.signal });
           clearTimeout(timeoutId);
           if (res.ok) {
-            const buf = await res.arrayBuffer();
-            if (buf && buf.byteLength > 100) {
-              return { index, buffer: buf };
+            const ct = res.headers.get('content-type') || '';
+            if (!ct.includes('text/html')) {
+              const buf = await res.arrayBuffer();
+              if (buf && buf.byteLength > 100) {
+                return { index, buffer: buf };
+              }
             }
           }
         } catch (e) {
@@ -527,45 +547,58 @@ export default function App() {
     setIsSynthesizing(true);
     
     const wordCount = text.trim().split(/\s+/).length;
-    showStatus(`⚡ Generating superfast download for ${wordCount} words...`, 'info');
+    showStatus(`⚡ Generating superfast audio for ${wordCount} words...`, 'info');
 
-    try {
-      const response = await fetch('/api/generate-tts', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          text: text,
-          lang: settings.lang,
-          voice: settings.voice,
-          fastMode: true
-        })
-      });
-      
-      if (!response.ok) {
-        throw new Error(`Server endpoint not reachable (${response.status})`);
-      }
+    const apiEndpoints = [
+      '/api/generate-tts',
+      '/.netlify/functions/generate-tts',
+      '/.netlify/functions/tts'
+    ];
 
-      const contentType = response.headers.get('content-type') || '';
-      const ext = contentType.includes('mpeg') || contentType.includes('mp3') ? 'mp3' : 'wav';
-
-      const blob = await response.blob();
-      const url = URL.createObjectURL(blob);
-      setAudioUrl(url);
-
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = `voicewala_${settings.voice}_${Date.now()}.${ext}`;
-      a.click();
-      
-      showStatus('Audio download started!', 'success');
-    } catch (e) {
-      console.warn("Backend API not reachable (e.g. Netlify static hosting). Using Client-Side Audio Generator...", e);
+    for (const ep of apiEndpoints) {
       try {
-        await generateClientSideAudioDownload();
-      } catch (fallbackErr: any) {
-        console.error(fallbackErr);
-        showStatus(`Download Error: ${fallbackErr.message || 'Failed to generate audio'}`, 'error');
+        const response = await fetch(ep, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            text: text,
+            lang: settings.lang,
+            voice: settings.voice,
+            fastMode: true
+          })
+        });
+
+        if (response.ok) {
+          const contentType = response.headers.get('content-type') || '';
+          if (!contentType.includes('text/html')) {
+            const ext = contentType.includes('mpeg') || contentType.includes('mp3') ? 'mp3' : 'wav';
+            const blob = await response.blob();
+            if (blob && blob.size > 100) {
+              const url = URL.createObjectURL(blob);
+              setAudioUrl(url);
+
+              const a = document.createElement('a');
+              a.href = url;
+              a.download = `voicewala_${settings.voice}_${Date.now()}.${ext}`;
+              a.click();
+              
+              showStatus('Audio download started!', 'success');
+              setIsSynthesizing(false);
+              return;
+            }
+          }
+        }
+      } catch (e) {
+        // try next endpoint
       }
+    }
+
+    console.warn("Server endpoints unreachable. Falling back to client-side audio worker...");
+    try {
+      await generateClientSideAudioDownload();
+    } catch (fallbackErr: any) {
+      console.error(fallbackErr);
+      showStatus(`Download Error: ${fallbackErr.message || 'Failed to generate audio'}`, 'error');
     } finally {
       setIsSynthesizing(false);
     }
